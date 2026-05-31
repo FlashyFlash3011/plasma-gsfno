@@ -1,0 +1,12 @@
+*.egg-info/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+.hydra/
+outputs/
+multirun/
+*.pt
+*.h5
+*.hdf5
