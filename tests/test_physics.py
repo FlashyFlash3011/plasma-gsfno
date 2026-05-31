@@ -125,7 +125,45 @@ def test_magnetic_field_shapes():
 
 
 # ---------------------------------------------------------------------------
-# 5. test_gs_residual_loss_gradient_flow
+# 5. test_magnetic_field_values
+# ---------------------------------------------------------------------------
+
+def test_magnetic_field_values():
+    """Verify B-field values are numerically correct using ψ = R * Z.
+
+    Analytical results:
+        ∂ψ/∂Z = R  →  B_R = -(1/R) * R = -1  (uniform on interior)
+        ∂ψ/∂R = Z  →  B_Z =  (1/R) * Z = Z/R (varies)
+    """
+    NR, NZ = 33, 33
+    R_vals = torch.linspace(0.5, 1.5, NR)
+    Z_vals = torch.linspace(-0.5, 0.5, NZ)
+    dR = (R_vals[-1] - R_vals[0]).item() / (NR - 1)
+    dZ = (Z_vals[-1] - Z_vals[0]).item() / (NZ - 1)
+    R_grid, Z_grid = torch.meshgrid(R_vals, Z_vals, indexing="ij")
+    R_grid = R_grid.unsqueeze(0).unsqueeze(0)   # (1, 1, NR, NZ)
+    Z_grid = Z_grid.unsqueeze(0).unsqueeze(0)   # (1, 1, NR, NZ)
+
+    psi = R_grid * Z_grid   # ψ = R * Z
+
+    B_R, B_Z = compute_magnetic_field(psi, R_grid, dR, dZ)
+
+    # Interior slice (skip 1-cell boundary where FD is zero)
+    B_R_int = B_R[:, :, 1:-1, 1:-1]
+    B_Z_int = B_Z[:, :, 1:-1, 1:-1]
+
+    # B_R should equal -1.0 everywhere on interior (∂ψ/∂Z = R, so B_R = -(1/R)*R = -1)
+    assert torch.allclose(B_R_int, torch.full_like(B_R_int, -1.0), atol=1e-5), \
+        f"B_R max error: {(B_R_int + 1.0).abs().max()}"
+
+    # B_Z = (1/R)*∂ψ/∂R = (1/R)*Z = Z/R on interior
+    expected_BZ = Z_grid[:, :, 1:-1, 1:-1] / R_grid[:, :, 1:-1, 1:-1]
+    assert torch.allclose(B_Z_int, expected_BZ, atol=1e-5), \
+        f"B_Z max error: {(B_Z_int - expected_BZ).abs().max()}"
+
+
+# ---------------------------------------------------------------------------
+# 6. test_gs_residual_loss_gradient_flow
 # ---------------------------------------------------------------------------
 
 def test_gs_residual_loss_gradient_flow():
