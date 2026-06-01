@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing as mp
 import sys
 from pathlib import Path
 
@@ -72,6 +73,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _worker(args_tuple: tuple) -> list[dict]:
+    """Generate a chunk of samples in a subprocess."""
+    import logging as _logging
+    import warnings as _warnings
+    _logging.disable(_logging.WARNING)
+    _warnings.filterwarnings("ignore")  # suppress FreeGS/numpy RuntimeWarnings
+
+    nr, nz, seed, n_chunk = args_tuple
+    gen = PlasmaConfigGenerator(NR=nr, NZ=nz, seed=seed)
+    results = []
+    attempts = 0
+    max_attempts = 3 * n_chunk
+    while len(results) < n_chunk and attempts < max_attempts:
+        r = gen.generate_one()
+        attempts += 1
+        if r is not None:
+            results.append(r)
+    return results
+
+
 def main() -> None:
     args = parse_args()
 
@@ -94,18 +115,14 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    n_workers = max(1, args.workers)
     logger.info(
-        "Generating %d samples on a %d×%d grid -> %s",
+        "Generating %d samples on a %d×%d grid -> %s  (workers=%d)",
         args.n_samples,
         args.nr,
         args.nz,
         output_path,
-    )
-
-    generator = PlasmaConfigGenerator(
-        NR=args.nr,
-        NZ=args.nz,
-        seed=args.seed,
+        n_workers,
     )
 
     try:
@@ -113,35 +130,52 @@ def main() -> None:
     except ImportError:
         tqdm = None
 
-    # generate_batch handles retries internally; wrap with a progress bar
     n = args.n_samples
     samples: list[dict] = []
-    max_attempts = 3 * n
 
-    if tqdm is not None:
-        pbar = tqdm(total=n, desc="Generating equilibria", unit="sample")
+    if n_workers == 1:
+        # Single-process path (original behaviour)
+        generator = PlasmaConfigGenerator(NR=args.nr, NZ=args.nz, seed=args.seed)
+        max_attempts = 3 * n
+        pbar = tqdm(total=n, desc="Generating equilibria", unit="sample") if tqdm else None
+        attempts = 0
+        while len(samples) < n and attempts < max_attempts:
+            result = generator.generate_one()
+            attempts += 1
+            if result is not None:
+                samples.append(result)
+                if pbar is not None:
+                    pbar.update(1)
+            else:
+                logger.debug(
+                    "Attempt %d/%d failed, have %d/%d samples.",
+                    attempts, max_attempts, len(samples), n,
+                )
+        if pbar is not None:
+            pbar.close()
     else:
-        pbar = None
-
-    attempts = 0
-    while len(samples) < n and attempts < max_attempts:
-        result = generator.generate_one()
-        attempts += 1
-        if result is not None:
-            samples.append(result)
-            if pbar is not None:
-                pbar.update(1)
-        else:
-            logger.debug(
-                "Attempt %d/%d failed, have %d/%d samples.",
-                attempts,
-                max_attempts,
-                len(samples),
-                n,
-            )
-
-    if pbar is not None:
-        pbar.close()
+        # Multi-process path: submit many small tasks so the progress bar updates
+        # continuously rather than waiting for one giant chunk per worker.
+        task_size = 100  # samples per task
+        n_tasks = (n + task_size - 1) // task_size
+        # Give each task a unique seed so workers produce non-overlapping sequences
+        worker_args = [
+            (args.nr, args.nz, args.seed + i * task_size, task_size)
+            for i in range(n_tasks)
+        ]
+        pbar = tqdm(total=n, desc="Generating equilibria", unit="sample") if tqdm else None
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=n_workers) as pool:
+            for chunk in pool.imap_unordered(_worker, worker_args):
+                needed = n - len(samples)
+                samples.extend(chunk[:needed])
+                if pbar is not None:
+                    pbar.update(min(len(chunk), needed))
+                if len(samples) >= n:
+                    pool.terminate()
+                    break
+        if pbar is not None:
+            pbar.close()
 
     if len(samples) < n:
         logger.warning(

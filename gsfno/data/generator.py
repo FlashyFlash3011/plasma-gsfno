@@ -157,26 +157,30 @@ class PlasmaConfigGenerator:
     # ------------------------------------------------------------------
 
     def _boundary_mask(self, psi: np.ndarray, eq) -> np.ndarray:  # type: ignore[type-arg]
-        """Compute binary mask: 1 inside separatrix, 0 outside.
+        """Compute binary mask: 1 inside the plasma core, 0 outside.
 
-        Uses the O-point / X-point psi values from the equilibrium object.
-        Falls back to a simple threshold if FreeGS psi_bndry is unavailable.
+        With fixedBoundary, psi_bndry=0 and psi_axis>0, so the conventional
+        separatrix mask is all-ones (plasma fills the domain).  Instead we
+        define the core as psi_norm >= _CORE_FRACTION, where psi_norm is
+        normalised to [0=boundary, 1=axis].  This produces a localized mask
+        that varies across samples.
         """
+        _CORE_FRACTION = 0.05  # include everything down to 5 % of peak psi
+
         try:
             psi_axis = float(eq.psi_axis)
-            psi_bndry = float(eq.psi_bndry)
+            psi_bndry = float(eq.psi_bndry) if eq.psi_bndry is not None else 0.0
         except AttributeError:
-            # Fallback: use median as a crude boundary threshold
-            psi_bndry = float(np.median(psi))
-            psi_axis = float(psi.min())
+            psi_axis = float(psi.max())
+            psi_bndry = 0.0
 
-        # Inside separatrix: psi between axis and boundary (handle both signs)
-        if psi_axis < psi_bndry:
-            mask = (psi >= psi_axis) & (psi <= psi_bndry)
-        else:
-            mask = (psi <= psi_axis) & (psi >= psi_bndry)
+        denom = psi_axis - psi_bndry
+        if abs(denom) < _EPS:
+            return np.ones_like(psi, dtype=np.float32)
 
-        return mask.astype(np.float32)
+        psi_norm = (psi - psi_bndry) / denom  # 0 at boundary, 1 at axis
+        mask = (psi_norm >= _CORE_FRACTION).astype(np.float32)
+        return mask
 
     # ------------------------------------------------------------------
     # Single-sample generation
@@ -217,34 +221,30 @@ class PlasmaConfigGenerator:
         p_scale = params["p_scale"]
 
         try:
-            # Build shaped boundary (D-shaped cross-section)
-            theta = np.linspace(0, 2 * np.pi, 129)[:-1]  # 128 points
-            R_boundary = R0 + a * np.cos(theta + delta * np.sin(theta))
-            Z_boundary = kappa * a * np.sin(theta)
-
-            boundary = freegs.machine.Wall(R_boundary, Z_boundary)
-            tokamak = freegs.machine.Machine(coils=[], wall=boundary)
-
-            # Create equilibrium grid
+            # Fixed-boundary solve on the standard rectangular domain.
+            # Free-boundary (freeBoundaryHagenow) diverges without external coils
+            # because there is no confining field.  With fixedBoundary, psi=0 on
+            # the rectangular edges and the GS equation is solved self-consistently
+            # inside the domain.  This is sufficient for generating diverse training
+            # equilibria with varying pressure/current profiles.
             eq = freegs.Equilibrium(
-                tokamak=tokamak,
                 Rmin=self.R_min,
                 Rmax=self.R_max,
                 Zmin=self.Z_min,
                 Zmax=self.Z_max,
                 nx=self.NR,
                 ny=self.NZ,
-                boundary=freegs.boundary.freeBoundaryHagenow,
+                boundary=freegs.boundary.fixedBoundary,
             )
 
             # Profiles: pressure on axis and vacuum f = R*Btor
             paxis = float(p_scale)  # pa ~ p_scale as axis pressure proxy
             fvac = R0 * 2.0  # vacuum toroidal field factor (simplified)
 
-            profiles = freegs.jtor.ConstrainPaxisIp(paxis, Ip, fvac)
+            profiles = freegs.jtor.ConstrainPaxisIp(eq, paxis, Ip, fvac)
 
-            # Solve
-            freegs.solve(eq, profiles, constrain=None, maxits=25, atol=1e-4)
+            # Solve (fixedBoundary reliably converges; 50 iters with loose atol)
+            freegs.solve(eq, profiles, constrain=None, maxits=50, atol=1e-4)
 
             # Extract raw psi (NR, NZ)
             psi_raw = eq.psi()  # numpy array from FreeGS
