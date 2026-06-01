@@ -7,4 +7,4 @@ grad_clip: 1.0
 early_stopping_patience: 20
 checkpoint_dir: checkpoints/
 log_interval: 10
-amp: false
+amp: true

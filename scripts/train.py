@@ -65,7 +65,7 @@ def main(cfg: DictConfig) -> None:
     stopper = EarlyStopping(patience=cfg.train.early_stopping_patience, mode="min")
 
     # --- AMP ---
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg.train.amp)
+    scaler = torch.amp.GradScaler(enabled=cfg.train.amp)
 
     # --- Grid geometry for physics loss ---
     # Pre-compute R_grid once (same for all samples since grid is fixed)
@@ -91,7 +91,7 @@ def main(cfg: DictConfig) -> None:
             psi_true = psi_true.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=cfg.train.amp):
+            with torch.amp.autocast(device_type=device.type, enabled=cfg.train.amp):
                 psi_pred = model(inputs)
                 loss, metrics = model.compute_loss(
                     psi_pred, psi_true, inputs, R_grid, dR, dZ
