@@ -84,8 +84,8 @@ class GradShafranovDataset(Dataset):
         inputs = f["inputs"][global_idx]  # (5, NR, NZ)
         psi = f["psi"][global_idx]         # (1, NR, NZ)
 
-        inputs_t = torch.from_numpy(np.array(inputs, dtype=np.float32))
-        psi_t = torch.from_numpy(np.array(psi, dtype=np.float32))
+        inputs_t = torch.from_numpy(np.array(inputs))
+        psi_t = torch.from_numpy(np.array(psi))
 
         if self.transform is not None:
             inputs_t = self.transform(inputs_t)
@@ -156,7 +156,6 @@ def write_hdf5(
     # Build splits array
     n_train = round(split_fractions[0] * N)
     n_val = round(split_fractions[1] * N)
-    n_test = N - n_train - n_val
 
     splits_arr = np.empty(N, dtype=np.int8)
     splits_arr[:n_train] = 0

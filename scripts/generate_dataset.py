@@ -178,12 +178,7 @@ def main() -> None:
             pbar.close()
 
     if len(samples) < n:
-        logger.warning(
-            "Only collected %d/%d samples after %d attempts.",
-            len(samples),
-            n,
-            attempts,
-        )
+        logger.warning("Only collected %d/%d samples.", len(samples), n)
 
     if len(samples) == 0:
         logger.error("No samples were generated. Aborting.")

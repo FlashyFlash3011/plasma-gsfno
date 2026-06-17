@@ -104,7 +104,10 @@ class GradShafranovFNO(nn.Module):
         rel_l2 = relative_l2_error(psi_pred, psi_true)
 
         lambda_eff = self.lambda_phys if self._current_epoch >= self.phys_warmup_epochs else 0.0
-        phys_loss = gs_residual_loss(psi_pred, p_prime, ff_prime, R_grid, dR, dZ)
+        if lambda_eff > 0:
+            phys_loss = gs_residual_loss(psi_pred, p_prime, ff_prime, R_grid, dR, dZ)
+        else:
+            phys_loss = torch.zeros(1, device=psi_pred.device)
 
         total = mse + 0.01 * rel_l2 + lambda_eff * phys_loss
 

@@ -15,6 +15,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from gsfno.model import GradShafranovFNO
+from gsfno.data.dataset import GradShafranovDataset
+from solaris.utils.training import EarlyStopping, GradientClipper, WarmupCosineScheduler
+from solaris.utils import get_logger, save_checkpoint
+
 
 def _get_amp_context(amp_dtype: str, device: torch.device):
     if amp_dtype == "bf16":
@@ -22,11 +27,6 @@ def _get_amp_context(amp_dtype: str, device: torch.device):
     if amp_dtype == "fp16":
         return torch.autocast(device_type=device.type, dtype=torch.float16)
     return torch.autocast(device_type=device.type, enabled=False)
-
-from gsfno.model import GradShafranovFNO
-from gsfno.data.dataset import GradShafranovDataset
-from solaris.utils.training import EarlyStopping, GradientClipper, WarmupCosineScheduler
-from solaris.utils import get_logger, save_checkpoint, load_checkpoint
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
@@ -90,7 +90,6 @@ def main(cfg: DictConfig) -> None:
     ckpt_dir = Path(cfg.train.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")
-    val_loss = float("inf")
 
     for epoch in range(1, cfg.train.epochs + 1):
         model.set_epoch(epoch)
@@ -109,11 +108,16 @@ def main(cfg: DictConfig) -> None:
                     psi_pred, psi_true, inputs, R_grid, dR, dZ
                 )
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            clipper(model)
-            scaler.step(optimizer)
-            scaler.update()
+            if use_scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                clipper(model)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                clipper(model)
+                optimizer.step()
 
             train_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
