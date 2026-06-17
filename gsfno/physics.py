@@ -70,6 +70,22 @@ def star_laplacian(psi: Tensor, R: Tensor, dR: float, dZ: float) -> Tensor:
     return result
 
 
+def gs_residual_dimensionless(psi_hat, pprime_hat, ffprime_hat, R_hat, dR_hat, dZ_hat):
+    """Dimensionless Grad-Shafranov residual: Delta*psi_hat + R_hat*pprime_hat + ffprime_hat.
+
+    All inputs are already in the global dimensionless system (see gsfno.units),
+    so every term is O(1) and the residual vanishes (to FD truncation) on a true
+    equilibrium.
+
+    Shapes:
+        psi_hat, pprime_hat, ffprime_hat: (B, 1, NR, NZ)
+        R_hat: (1, 1, NR, 1) broadcastable
+    """
+    R_1d = R_hat.reshape(-1, R_hat.shape[-2], R_hat.shape[-1])[0, :, 0]
+    lap = star_laplacian(psi_hat, R_1d, dR_hat, dZ_hat)
+    return lap + R_hat * pprime_hat + ffprime_hat
+
+
 def gs_residual(
     psi: Tensor,
     p_prime: Tensor,
@@ -109,28 +125,11 @@ def gs_residual(
     return lap + mu0 * R_grid * p_prime + ff_prime
 
 
-def gs_residual_loss(
-    psi: Tensor,
-    p_prime: Tensor,
-    ff_prime: Tensor,
-    R_grid: Tensor,
-    dR: float,
-    dZ: float,
-) -> Tensor:
-    """Mean-squared Grad-Shafranov residual — scalar physics loss term.
-
-    Args:
-        psi:      (B, 1, NR, NZ) predicted flux field.
-        p_prime:  (B, 1, NR, NZ) pressure profile channel.
-        ff_prime: (B, 1, NR, NZ) current profile channel.
-        R_grid:   (B, 1, NR, NZ) or broadcastable — R coordinate on the grid.
-        dR:       Grid spacing in R.
-        dZ:       Grid spacing in Z.
-
-    Returns:
-        Scalar tensor — mean squared GS residual.
-    """
-    return gs_residual(psi, p_prime, ff_prime, R_grid, dR, dZ).pow(2).mean()
+def gs_residual_loss(psi_hat, pprime_hat, ffprime_hat, R_hat, dR_hat, dZ_hat):
+    """Mean-squared dimensionless GS residual (scalar)."""
+    return gs_residual_dimensionless(
+        psi_hat, pprime_hat, ffprime_hat, R_hat, dR_hat, dZ_hat
+    ).pow(2).mean()
 
 
 def compute_magnetic_field(

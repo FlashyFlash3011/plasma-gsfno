@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,6 +12,7 @@ from gsfno.physics import (
     compute_magnetic_field,
     divergence_free_error,
     gs_residual,
+    gs_residual_dimensionless,
     gs_residual_loss,
     star_laplacian,
 )
@@ -167,16 +169,59 @@ def test_magnetic_field_values():
 # ---------------------------------------------------------------------------
 
 def test_gs_residual_loss_gradient_flow():
-    """gs_residual_loss must be differentiable w.r.t. psi."""
+    """gs_residual_loss (dimensionless) must be differentiable w.r.t. psi_hat."""
     R, Z, dR, dZ, R_grid, RR, ZZ = _make_grid(NR=33, NZ=33)
 
-    psi = torch.randn(2, 1, 33, 33, requires_grad=True)
-    p_prime  = torch.zeros(2, 1, 33, 33)
-    ff_prime = torch.zeros(2, 1, 33, 33)
-    R_grid_exp = R_grid.expand(2, -1, -1, -1)
+    psi_hat = torch.randn(2, 1, 33, 33, requires_grad=True)
+    pprime_hat  = torch.zeros(2, 1, 33, 33)
+    ffprime_hat = torch.zeros(2, 1, 33, 33)
+    R_hat = R_grid  # shape (1, 1, NR, NZ) — broadcastable
 
-    loss = gs_residual_loss(psi, p_prime, ff_prime, R_grid_exp, dR, dZ)
+    loss = gs_residual_loss(psi_hat, pprime_hat, ffprime_hat, R_hat, dR, dZ)
     loss.backward()
 
-    assert psi.grad is not None, "psi.grad should not be None after backward()"
-    assert not torch.isnan(psi.grad).any(), "psi.grad contains NaNs"
+    assert psi_hat.grad is not None, "psi_hat.grad should not be None after backward()"
+    assert not torch.isnan(psi_hat.grad).any(), "psi_hat.grad contains NaNs"
+
+
+# ---------------------------------------------------------------------------
+# 7. test_residual_vanishes_on_true_solution  (dimensionless manufactured)
+# ---------------------------------------------------------------------------
+
+def _manufactured_solovev(NR=129, NZ=129):
+    """Solov'ev: psi = 0.5*(R^2 * Z^2)/... use the standard exact form
+    psi(R,Z) for which Delta* psi = a*R^2 + b is exact.
+
+    Use psi = (1/2) * R^2 * Z  -> Delta*psi:
+      d2/dR2 (psi) = Z ; (1/R) dpsi/dR = (1/R)*(R*Z) = Z ; d2/dZ2 = 0
+      Delta* = d2/dR2 - (1/R)dpsi/dR + d2/dZ2 = Z - Z + 0 = 0.
+    So with psi = 0.5 R^2 Z, Delta*psi = 0 exactly; pick pprime=ffprime=0
+    => residual must be ~0 (FD truncation only).
+    """
+    R = np.linspace(0.6, 1.4, NR)
+    Z = np.linspace(-0.4, 0.4, NZ)
+    RR, ZZ = np.meshgrid(R, Z, indexing="ij")
+    psi = 0.5 * RR**2 * ZZ
+    dR = float(R[1] - R[0])
+    dZ = float(Z[1] - Z[0])
+    return psi, R, dR, dZ
+
+
+def test_residual_vanishes_on_true_solution():
+    psi, R, dR, dZ = _manufactured_solovev()
+    psi_t = torch.from_numpy(psi).view(1, 1, *psi.shape).double()
+    R_t = torch.from_numpy(R).view(1, 1, -1, 1).double()
+    zeros = torch.zeros_like(psi_t)
+    res = gs_residual_dimensionless(psi_t, zeros, zeros, R_t, dR, dZ)
+    interior = res[:, :, 2:-2, 2:-2]
+    # FD truncation only — must be tiny relative to field scale.
+    assert interior.abs().max().item() < 1e-2
+
+
+def test_residual_loss_is_scalar_and_nonneg():
+    psi, R, dR, dZ = _manufactured_solovev(33, 33)
+    psi_t = torch.from_numpy(psi).view(1, 1, *psi.shape).double()
+    R_t = torch.from_numpy(R).view(1, 1, -1, 1).double()
+    zeros = torch.zeros_like(psi_t)
+    loss = gs_residual_loss(psi_t, zeros, zeros, R_t, dR, dZ)
+    assert loss.ndim == 0 and loss.item() >= 0.0
