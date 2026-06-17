@@ -53,9 +53,13 @@ class GradShafranovDataset(Dataset):
         self.transform = transform
         self.target_transform = target_transform
 
-        self._file = h5py.File(self._hdf5_path, "r")
-
-        splits_arr = self._file["splits"][:]  # (N,)
+        # Do NOT keep an open handle on the instance: when DataLoader forks
+        # workers, an inherited h5py handle deadlocks.  Read splits once to
+        # build the index, then close.  Each worker opens its own handle
+        # lazily in __getitem__ via _file().
+        self._handle: h5py.File | None = None
+        with h5py.File(self._hdf5_path, "r") as f:
+            splits_arr = f["splits"][:]  # (N,)
         N = splits_arr.shape[0]
 
         split_code = self.SPLIT_MAP[split]
@@ -64,14 +68,21 @@ class GradShafranovDataset(Dataset):
         else:
             self._indices = np.where(splits_arr == split_code)[0].astype(np.intp)
 
+    def _file(self) -> h5py.File:
+        """Return a per-process h5py handle, opening it on first use."""
+        if self._handle is None:
+            self._handle = h5py.File(self._hdf5_path, "r")
+        return self._handle
+
     def __len__(self) -> int:
         return len(self._indices)
 
     def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
         """Returns (inputs, psi) as float32 tensors."""
         global_idx = int(self._indices[idx])
-        inputs = self._file["inputs"][global_idx]  # (5, NR, NZ)
-        psi = self._file["psi"][global_idx]         # (1, NR, NZ)
+        f = self._file()
+        inputs = f["inputs"][global_idx]  # (5, NR, NZ)
+        psi = f["psi"][global_idx]         # (1, NR, NZ)
 
         inputs_t = torch.from_numpy(np.array(inputs, dtype=np.float32))
         psi_t = torch.from_numpy(np.array(psi, dtype=np.float32))
@@ -86,19 +97,20 @@ class GradShafranovDataset(Dataset):
     @property
     def params_keys(self) -> list[str]:
         """Ordered list of parameter names (columns of /params)."""
-        raw = self._file["params"].attrs["params_keys"]
+        raw = self._file()["params"].attrs["params_keys"]
         return json.loads(raw)
 
     def get_params(self, idx: int) -> dict:
         """Return the plasma config params dict for sample idx."""
         global_idx = int(self._indices[idx])
-        row = self._file["params"][global_idx]  # (K,)
+        row = self._file()["params"][global_idx]  # (K,)
         keys = self.params_keys
         return {k: float(row[i]) for i, k in enumerate(keys)}
 
     def __del__(self) -> None:
         try:
-            self._file.close()
+            if self._handle is not None:
+                self._handle.close()
         except Exception:
             pass
 

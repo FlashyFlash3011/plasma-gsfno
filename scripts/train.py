@@ -13,6 +13,15 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+
+def _get_amp_context(amp_dtype: str, device: torch.device):
+    if amp_dtype == "bf16":
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    if amp_dtype == "fp16":
+        return torch.autocast(device_type=device.type, dtype=torch.float16)
+    return torch.autocast(device_type=device.type, enabled=False)
 
 from gsfno.model import GradShafranovFNO
 from gsfno.data.dataset import GradShafranovDataset
@@ -65,7 +74,9 @@ def main(cfg: DictConfig) -> None:
     stopper = EarlyStopping(patience=cfg.train.early_stopping_patience, mode="min")
 
     # --- AMP ---
-    scaler = torch.amp.GradScaler(enabled=cfg.train.amp)
+    amp_ctx = _get_amp_context(cfg.train.amp_dtype, device)
+    use_scaler = cfg.train.amp_dtype == "fp16"
+    scaler = torch.amp.GradScaler(enabled=use_scaler)
 
     # --- Grid geometry for physics loss ---
     # Pre-compute R_grid once (same for all samples since grid is fixed)
@@ -86,12 +97,13 @@ def main(cfg: DictConfig) -> None:
         model.train()
         train_loss = 0.0
 
-        for inputs, psi_true in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.train.epochs}", leave=False)
+        for inputs, psi_true in pbar:
             inputs = inputs.to(device, non_blocking=True)
             psi_true = psi_true.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            with torch.amp.autocast(device_type=device.type, enabled=cfg.train.amp):
+            with amp_ctx:
                 psi_pred = model(inputs)
                 loss, metrics = model.compute_loss(
                     psi_pred, psi_true, inputs, R_grid, dR, dZ
@@ -104,6 +116,7 @@ def main(cfg: DictConfig) -> None:
             scaler.update()
 
             train_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         train_loss /= len(train_loader)
         scheduler.step()
