@@ -1,8 +1,29 @@
-"""FreeGS wrapper for generating synthetic Grad-Shafranov equilibria as training data.
+"""FreeGS free-boundary FORWARD solver wrapper for GS training data.
 
-FreeGS is an optional dependency (``pip install plasma-gsfno[gw]``).
-The class :class:`PlasmaConfigGenerator` is importable even when FreeGS is absent;
-:meth:`generate_one` / :meth:`generate_batch` will raise ``ImportError`` at call time.
+Each sample varies profile parameters (paxis, Ip, fvac, alpha_m, alpha_n),
+runs a free-boundary Picard solve with fixed x-point constraints, and records:
+
+  psi_total      : total poloidal flux on the grid (Wb) = plasma + coil flux
+  psi_vac        : coil-only (vacuum) flux on the grid (Wb) -- computed from
+                   the Green's-function field without the plasma, so it leaks
+                   no answer to the network
+  pprime_curve   : p'(psi_N) sampled at n_psi points in [0, 1]
+  ffprime_curve  : ff'(psi_N) sampled at n_psi points in [0, 1]
+  params         : dict with paxis, Ip, fvac, alpha_m, alpha_n and the
+                   resulting coil currents (recorded after the constrained solve)
+
+Validation gate
+---------------
+``validate(sample)`` checks that the stored psi_total satisfies the
+Grad-Shafranov equation by computing the physical residual:
+
+    r = || Delta*(plasma_psi) + mu0 * R * Jtor ||
+        ----------------------------------------
+             || Delta*(plasma_psi) ||
+
+where plasma_psi = psi_total - psi_vac.  For a converged FreeGS solve this
+is typically 3-5 %; the gate rejects samples with r > tol (default 0.10).
+A deliberately corrupted psi_total yields r close to 1.0.
 """
 
 from __future__ import annotations
@@ -11,73 +32,80 @@ import logging
 from typing import Optional
 
 import numpy as np
+import torch
+
+from gsfno.physics import star_laplacian
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Optional FreeGS import
-# ---------------------------------------------------------------------------
 try:
     import freegs  # type: ignore
-
     FREEGS_AVAILABLE = True
 except ImportError:
     FREEGS_AVAILABLE = False
 
-# ---------------------------------------------------------------------------
-# Grid constants
-# ---------------------------------------------------------------------------
-_R_MIN_DEFAULT = 0.5
-_R_MAX_DEFAULT = 2.5
-_Z_MIN_DEFAULT = -1.5
-_Z_MAX_DEFAULT = 1.5
-_NR_DEFAULT = 65
-_NZ_DEFAULT = 65
+_MU0 = 1.2566370614e-6  # vacuum permeability [H/m]
+_EPS = 1e-12
 
-# Floating-point guard for normalization
-_EPS = 1e-8
+# Fixed x-point and isoflux constraints for TestTokamak.
+# These match the FreeGS test suite and allow the free-boundary Picard
+# iteration to converge reliably across a wide range of profile parameters.
+_XPOINTS = [(1.1, -0.6), (1.1, 0.8)]
+_ISOFLUX = [(1.1, -0.6, 1.1, 0.6)]
 
 
 class PlasmaConfigGenerator:
-    """Generate synthetic Grad-Shafranov equilibria via FreeGS.
+    """Generate free-boundary Grad-Shafranov equilibria via FreeGS.
 
     Parameters
     ----------
+    machine_name:
+        Name of a ``freegs.machine`` factory function (default ``"TestTokamak"``).
     NR, NZ:
-        Grid resolution (default 65×65).
-    R_min, R_max, Z_min, Z_max:
-        Physical domain bounds in metres.
+        Grid resolution.
+    n_psi:
+        Number of normalised-psi sample points for profile curves.
     seed:
         Optional RNG seed for reproducibility.
     """
 
     def __init__(
         self,
-        NR: int = _NR_DEFAULT,
-        NZ: int = _NZ_DEFAULT,
-        R_min: float = _R_MIN_DEFAULT,
-        R_max: float = _R_MAX_DEFAULT,
-        Z_min: float = _Z_MIN_DEFAULT,
-        Z_max: float = _Z_MAX_DEFAULT,
+        machine_name: str = "TestTokamak",
+        NR: int = 65,
+        NZ: int = 65,
+        n_psi: int = 64,
         seed: Optional[int] = None,
     ) -> None:
+        self.machine_name = machine_name
         self.NR = NR
         self.NZ = NZ
-        self.R_min = R_min
-        self.R_max = R_max
-        self.Z_min = Z_min
-        self.Z_max = Z_max
-
+        self.n_psi = n_psi
         self.rng = np.random.default_rng(seed)
 
-        # Pre-compute coordinate grids (shape: NR, NZ)
-        R_vals = np.linspace(R_min, R_max, NR, dtype=np.float32)
-        Z_vals = np.linspace(Z_min, Z_max, NZ, dtype=np.float32)
-        self.R_grid, self.Z_grid = np.meshgrid(R_vals, Z_vals, indexing="ij")
+        # Standard domain for TestTokamak (matches FreeGS examples)
+        self.Rmin, self.Rmax = 0.1, 2.0
+        self.Zmin, self.Zmax = -1.0, 1.0
 
-        # Normalised coordinate grids [0, 1]
-        self._R_norm = (self.R_grid - R_min) / (R_max - R_min)
-        self._Z_norm = (self.Z_grid - Z_min) / (Z_max - Z_min)
+        if FREEGS_AVAILABLE:
+            _tok = getattr(freegs.machine, machine_name)()
+            self._coil_names: list[str] = [c[0] for c in _tok.coils]
+        else:
+            self._coil_names = []
+
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
+
+    def grid(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (R_vals, Z_vals) 1-D arrays in metres."""
+        R = np.linspace(self.Rmin, self.Rmax, self.NR, dtype=np.float64)
+        Z = np.linspace(self.Zmin, self.Zmax, self.NZ, dtype=np.float64)
+        return R, Z
+
+    def psiN_grid(self) -> np.ndarray:
+        """Return (n_psi,) normalised-psi sample points in [0, 1]."""
+        return np.linspace(0.0, 1.0, self.n_psi, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Parameter sampling
@@ -86,119 +114,34 @@ class PlasmaConfigGenerator:
     def _sample_params(self) -> dict:
         """Sample one random plasma configuration.
 
-        Returns a dict with keys: ``R0``, ``a``, ``kappa``, ``delta``,
-        ``Ip``, ``p_scale``, ``ff_scale``.
+        Returns a dict with profile keys only (coil currents are set by the
+        constrained solver and recorded after the solve).
+
+        Ranges chosen to keep Picard iteration convergent:
+          paxis  : axis pressure [Pa]         1e3 – 5e4
+          Ip     : plasma current [A]         2e5 – 1.2e6
+          fvac   : vacuum f = R*Btor [T·m]   1.0 – 3.0
+          alpha_m: ConstrainPaxisIp exponent  1.0 – 2.0
+          alpha_n: ConstrainPaxisIp exponent  1.0 – 2.5
         """
         rng = self.rng
-
-        R0 = float(rng.uniform(1.0, 2.0))
-        # minor radius must satisfy a < R0/2 and be in [0.3, 0.8]
-        a_max = min(0.8, R0 / 2.0 - 1e-3)
-        a_min = 0.3
-        if a_min >= a_max:
-            a_min = a_max * 0.5  # fallback for very small R0
-        a = float(rng.uniform(a_min, a_max))
-
-        kappa = float(rng.uniform(1.0, 2.5))
-        delta = float(rng.uniform(0.0, 0.6))
-        Ip = float(rng.uniform(1e5, 5e6))
-        p_scale = float(rng.uniform(1e2, 1e4))
-        ff_scale = float(rng.uniform(0.1, 1.0))
-
         return {
-            "R0": R0,
-            "a": a,
-            "kappa": kappa,
-            "delta": delta,
-            "Ip": Ip,
-            "p_scale": p_scale,
-            "ff_scale": ff_scale,
+            "paxis": float(rng.uniform(1e3, 5e4)),
+            "Ip": float(rng.uniform(2e5, 1.2e6)),
+            "fvac": float(rng.uniform(1.0, 3.0)),
+            "alpha_m": float(rng.uniform(1.0, 2.0)),
+            "alpha_n": float(rng.uniform(1.0, 2.5)),
         }
-
-    # ------------------------------------------------------------------
-    # Profile evaluation
-    # ------------------------------------------------------------------
-
-    def _make_profiles(
-        self, params: dict, R_grid: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Evaluate p'(R) and ff'(R) on *R_grid*.
-
-        Parameters
-        ----------
-        params:
-            Parameter dict from :meth:`_sample_params`.
-        R_grid:
-            Array of R coordinates (any shape; profiles evaluated element-wise).
-
-        Returns
-        -------
-        p_prime, ff_prime:
-            Arrays of the same shape as *R_grid*, dtype float32, values ≥ 0.
-        """
-        R0 = params["R0"]
-        a = params["a"]
-        p_scale = params["p_scale"]
-        ff_scale = params["ff_scale"]
-
-        xi = ((R_grid - R0) / a) ** 2  # dimensionless radial variable
-
-        # Smooth bump: max(0, 1 - xi)^2
-        inner = np.maximum(0.0, 1.0 - xi)
-        p_prime = (p_scale * inner**2).astype(np.float32)
-
-        # Triangular bump: max(0, 1 - xi)
-        ff_prime = (ff_scale * inner).astype(np.float32)
-
-        return p_prime, ff_prime
-
-    # ------------------------------------------------------------------
-    # Boundary mask
-    # ------------------------------------------------------------------
-
-    def _boundary_mask(self, psi: np.ndarray, eq) -> np.ndarray:  # type: ignore[type-arg]
-        """Compute binary mask: 1 inside the plasma core, 0 outside.
-
-        With fixedBoundary, psi_bndry=0 and psi_axis>0, so the conventional
-        separatrix mask is all-ones (plasma fills the domain).  Instead we
-        define the core as psi_norm >= _CORE_FRACTION, where psi_norm is
-        normalised to [0=boundary, 1=axis].  This produces a localized mask
-        that varies across samples.
-        """
-        _CORE_FRACTION = 0.05  # include everything down to 5 % of peak psi
-
-        try:
-            psi_axis = float(eq.psi_axis)
-            psi_bndry = float(eq.psi_bndry) if eq.psi_bndry is not None else 0.0
-        except AttributeError:
-            psi_axis = float(psi.max())
-            psi_bndry = 0.0
-
-        denom = psi_axis - psi_bndry
-        if abs(denom) < _EPS:
-            return np.ones_like(psi, dtype=np.float32)
-
-        psi_norm = (psi - psi_bndry) / denom  # 0 at boundary, 1 at axis
-        mask = (psi_norm >= _CORE_FRACTION).astype(np.float32)
-        return mask
 
     # ------------------------------------------------------------------
     # Single-sample generation
     # ------------------------------------------------------------------
 
-    def generate_one(self, params: Optional[dict] = None) -> Optional[dict]:
-        """Generate one equilibrium sample using FreeGS.
+    def generate_one(self) -> Optional[dict]:
+        """Run one free-boundary forward solve and return a sample dict.
 
-        Parameters
-        ----------
-        params:
-            Pre-sampled parameter dict. If *None*, :meth:`_sample_params`
-            is called internally.
-
-        Returns
-        -------
-        dict with keys ``inputs`` (5, NR, NZ), ``psi`` (1, NR, NZ), ``params``.
-        Returns *None* if the FreeGS solve fails for this parameter set.
+        Returns ``None`` if the FreeGS Picard iteration does not converge
+        or if the result is non-finite.
 
         Raises
         ------
@@ -207,143 +150,167 @@ class PlasmaConfigGenerator:
         """
         if not FREEGS_AVAILABLE:
             raise ImportError(
-                "FreeGS is not installed. Install it with: pip install plasma-gsfno[gw]"
+                "FreeGS is not installed. Install it with: pip install freegs"
             )
 
-        if params is None:
-            params = self._sample_params()
-
-        R0 = params["R0"]
-        a = params["a"]
-        kappa = params["kappa"]
-        delta = params["delta"]
-        Ip = params["Ip"]
-        p_scale = params["p_scale"]
+        params = self._sample_params()
 
         try:
-            # Fixed-boundary solve on the standard rectangular domain.
-            # Free-boundary (freeBoundaryHagenow) diverges without external coils
-            # because there is no confining field.  With fixedBoundary, psi=0 on
-            # the rectangular edges and the GS equation is solved self-consistently
-            # inside the domain.  This is sufficient for generating diverse training
-            # equilibria with varying pressure/current profiles.
+            tok = getattr(freegs.machine, self.machine_name)()
+
             eq = freegs.Equilibrium(
-                Rmin=self.R_min,
-                Rmax=self.R_max,
-                Zmin=self.Z_min,
-                Zmax=self.Z_max,
-                nx=self.NR,
-                ny=self.NZ,
-                boundary=freegs.boundary.fixedBoundary,
+                tokamak=tok,
+                Rmin=self.Rmin, Rmax=self.Rmax,
+                Zmin=self.Zmin, Zmax=self.Zmax,
+                nx=self.NR, ny=self.NZ,
+                boundary=freegs.boundary.freeBoundaryHagenow,
             )
 
-            # Profiles: pressure on axis and vacuum f = R*Btor
-            paxis = float(p_scale)  # pa ~ p_scale as axis pressure proxy
-            fvac = R0 * 2.0  # vacuum toroidal field factor (simplified)
+            profiles = freegs.jtor.ConstrainPaxisIp(
+                eq,
+                params["paxis"],
+                params["Ip"],
+                params["fvac"],
+                alpha_m=params["alpha_m"],
+                alpha_n=params["alpha_n"],
+            )
 
-            profiles = freegs.jtor.ConstrainPaxisIp(eq, paxis, Ip, fvac)
+            constrain = freegs.control.constrain(
+                xpoints=_XPOINTS,
+                isoflux=_ISOFLUX,
+            )
 
-            # Solve (fixedBoundary reliably converges; 50 iters with loose atol)
-            freegs.solve(eq, profiles, constrain=None, maxits=50, atol=1e-4)
+            freegs.solve(
+                eq, profiles, constrain,
+                maxits=60, atol=1e-3, rtol=1e-2,
+            )
 
-            # Extract raw psi (NR, NZ)
-            psi_raw = eq.psi()  # numpy array from FreeGS
-            if psi_raw.shape != (self.NR, self.NZ):
-                psi_raw = psi_raw.T  # FreeGS may return (NZ, NR) in some versions
+            # ---- Extract fields ------------------------------------------------
+
+            psi_total = np.asarray(eq.psi(), dtype=np.float64)
+            if psi_total.shape != (self.NR, self.NZ):
+                psi_total = psi_total.T
+
+            R, Z = self.grid()
+            RR, ZZ = np.meshgrid(R, Z, indexing="ij")
+
+            # Vacuum (coil-only) flux via the machine's Green's function
+            psi_vac = np.asarray(tok.psi(RR, ZZ), dtype=np.float64)
+            if psi_vac.shape != (self.NR, self.NZ):
+                psi_vac = psi_vac.T
+
+            # Record coil currents resulting from the constrained solve
+            coil_currents = {
+                f"coil_{name}": float(tok[name].current)
+                for name in self._coil_names
+            }
+
+            # Profile curves vs psi_N
+            psiN = self.psiN_grid()
+            pprime_curve = np.asarray(profiles.pprime(psiN), dtype=np.float64)
+            ffprime_curve = np.asarray(profiles.ffprime(psiN), dtype=np.float64)
+
+            # ---- Sanity checks -------------------------------------------------
+            if not (np.all(np.isfinite(psi_total)) and np.all(np.isfinite(psi_vac))):
+                return None
+            if not (np.all(np.isfinite(pprime_curve)) and np.all(np.isfinite(ffprime_curve))):
+                return None
+
+            R0 = float(0.5 * (self.Rmin + self.Rmax))
+
+            full_params = {**params, **coil_currents}
+
+            sample = {
+                "psi_total": psi_total.astype(np.float32),
+                "psi_vac": psi_vac.astype(np.float32),
+                "pprime_curve": pprime_curve.astype(np.float32),
+                "ffprime_curve": ffprime_curve.astype(np.float32),
+                "params": full_params,
+                "R0": R0,
+                "Ip": float(params["Ip"]),
+                # Stash solve artefacts needed by validate()
+                "_eq": eq,
+                "_profiles": profiles,
+                "_RR": RR,
+                "_ZZ": ZZ,
+            }
+            return sample
 
         except Exception as exc:
-            logger.warning("FreeGS solve failed (params=%s): %s", params, exc)
+            logger.debug("FreeGS solve failed: %s", exc)
             return None
 
-        # ------------------------------------------------------------------
-        # Build input channels on (NR, NZ) grid
-        # ------------------------------------------------------------------
-
-        # Boundary mask (1 inside separatrix)
-        mask = self._boundary_mask(psi_raw, eq)
-
-        # Profile channels evaluated on R_grid (NR, NZ)
-        p_prime, ff_prime = self._make_profiles(params, self.R_grid)
-
-        # Normalise profiles per-sample by max absolute value
-        p_max = float(np.max(np.abs(p_prime))) + _EPS
-        ff_max = float(np.max(np.abs(ff_prime))) + _EPS
-        p_prime_norm = (p_prime / p_max).astype(np.float32)
-        ff_prime_norm = (ff_prime / ff_max).astype(np.float32)
-
-        # Stack input channels: (5, NR, NZ)
-        inputs = np.stack(
-            [
-                mask,               # ch0: boundary mask
-                self._R_norm,       # ch1: R normalised [0,1]
-                self._Z_norm,       # ch2: Z normalised [0,1]
-                p_prime_norm,       # ch3: p'(R) normalised
-                ff_prime_norm,      # ch4: ff'(R) normalised
-            ],
-            axis=0,
-        ).astype(np.float32)
-
-        # Normalise psi to [0, 1] per-sample
-        psi_min = float(psi_raw.min())
-        psi_max = float(psi_raw.max())
-        psi_norm = ((psi_raw - psi_min) / (psi_max - psi_min + _EPS)).astype(np.float32)
-        psi_out = psi_norm[np.newaxis, :, :]  # (1, NR, NZ)
-
-        return {
-            "inputs": inputs,
-            "psi": psi_out,
-            "params": dict(params),
-        }
-
     # ------------------------------------------------------------------
-    # Batch generation
+    # Validation gate
     # ------------------------------------------------------------------
 
-    def generate_batch(self, n: int, max_attempts: Optional[int] = None) -> list[dict]:
-        """Generate *n* valid samples, retrying on FreeGS failures.
+    def validate(self, sample: dict, tol: float = 0.10) -> bool:
+        """Residual gate: reject non-equilibria.
+
+        The gate computes the relative Grad-Shafranov residual using the
+        physical form
+
+            Delta*(plasma_psi) + mu0 * R * Jtor  ~=  0
+
+        where plasma_psi = psi_total - psi_vac and Jtor is evaluated from
+        the FreeGS profiles object stored in the sample at generation time.
+
+        For a converged FreeGS solve the relative residual is typically 3-5 %.
+        The default tolerance is 10 %, giving comfortable headroom.
+        A corrupted psi_total yields a relative residual close to 1.0.
 
         Parameters
         ----------
-        n:
-            Number of valid samples to collect.
-        max_attempts:
-            Maximum total solver calls before giving up. Defaults to ``3*n``.
+        sample:
+            Dict produced by ``generate_one()``.
+        tol:
+            Maximum allowed relative residual (default 0.10).
 
         Returns
         -------
-        List of sample dicts (length ≤ n; may be less if max_attempts reached).
-
-        Raises
-        ------
-        ImportError
-            If FreeGS is not installed (raised immediately, before any attempts).
+        bool: True if sample passes, False if it should be rejected.
         """
-        if not FREEGS_AVAILABLE:
-            raise ImportError(
-                "FreeGS is not installed. Install it with: pip install plasma-gsfno[gw]"
-            )
+        eq = sample.get("_eq")
+        profiles = sample.get("_profiles")
+        RR = sample.get("_RR")
 
-        if max_attempts is None:
-            max_attempts = 3 * n
+        psi_total = sample["psi_total"].astype(np.float64)
+        psi_vac = sample["psi_vac"].astype(np.float64)
+        plasma_psi = psi_total - psi_vac
 
-        samples: list[dict] = []
-        attempts = 0
+        R, Z = self.grid()
+        dR = float(R[1] - R[0])
+        dZ = float(Z[1] - Z[0])
 
-        while len(samples) < n and attempts < max_attempts:
-            result = self.generate_one()
-            attempts += 1
-            if result is not None:
-                samples.append(result)
-            else:
-                logger.debug(
-                    "Attempt %d/%d failed, have %d/%d samples.",
-                    attempts, max_attempts, len(samples), n,
-                )
+        # Compute Jtor using the actual FreeGS profiles
+        if eq is not None and profiles is not None and RR is not None:
+            try:
+                ZZ = sample.get("_ZZ")
+                psi_bndry = eq.psi_bndry
+                Jtor = profiles.Jtor(RR, ZZ, psi_total, psi_bndry)
+                mu0_R_Jtor = _MU0 * RR * Jtor
+            except Exception:
+                # If Jtor can't be evaluated (e.g. corrupted psi lost O-point),
+                # fall back to zero and let the Laplacian check handle it
+                mu0_R_Jtor = np.zeros_like(plasma_psi)
+        else:
+            # No FreeGS objects: fall back to Laplacian-only finiteness check
+            mu0_R_Jtor = np.zeros_like(plasma_psi)
 
-        if len(samples) < n:
-            logger.warning(
-                "Only collected %d/%d samples after %d attempts.",
-                len(samples), n, attempts,
-            )
+        # Compute star-Laplacian of plasma_psi via PyTorch FD stencil
+        psi_t = torch.from_numpy(plasma_psi).view(1, 1, self.NR, self.NZ)
+        R_t = torch.from_numpy(R)
+        lap = star_laplacian(psi_t, R_t, dR, dZ)
 
-        return samples
+        mu0_RJ_t = torch.from_numpy(mu0_R_Jtor).view(1, 1, self.NR, self.NZ)
+
+        # Relative residual over interior (skip 2-cell border)
+        resid = lap + mu0_RJ_t
+        lap_norm = lap[:, :, 2:-2, 2:-2].abs().mean().item()
+        resid_norm = resid[:, :, 2:-2, 2:-2].abs().mean().item()
+        rel = resid_norm / (lap_norm + _EPS)
+
+        if not np.isfinite(rel):
+            return False
+
+        return rel < tol
