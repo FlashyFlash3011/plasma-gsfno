@@ -10,3 +10,8 @@ multirun/
 *.pt
 *.h5
 *.hdf5
+
+# Claude Code / planning artifacts (not part of the submission)
+docs/superpowers/
+.claude/
+CLAUDE.md
