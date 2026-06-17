@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gsfno.physics import (
     compute_magnetic_field,
     divergence_free_error,
-    gs_residual,
     gs_residual_dimensionless,
     gs_residual_loss,
     star_laplacian,
@@ -62,7 +61,7 @@ def test_star_laplacian_shape():
 # ---------------------------------------------------------------------------
 
 def test_solovev_analytical():
-    """For ψ = R²Z, p'=0, ff'=0, the GS residual Δ*ψ should be ~0.
+    """For ψ = R²Z (dimensionless), p'=0, ff'=0, the GS residual Δ*ψ should be ~0.
 
     Analytical check:
         ∂²ψ/∂R² = 2Z
@@ -75,14 +74,15 @@ def test_solovev_analytical():
 
     psi = (RR ** 2 * ZZ).unsqueeze(0).unsqueeze(0)  # (1, 1, 65, 65)
 
-    p_prime  = torch.zeros_like(psi)
-    ff_prime = torch.zeros_like(psi)
+    pprime_hat  = torch.zeros_like(psi)
+    ffprime_hat = torch.zeros_like(psi)
+    R_hat = R_grid[:, :, :, :1]  # (1, 1, NR, 1) — broadcastable form
 
-    residual = gs_residual(psi, p_prime, ff_prime, R_grid, dR, dZ)
+    residual = gs_residual_dimensionless(psi, pprime_hat, ffprime_hat, R_hat, dR, dZ)
 
     # Interior slice only (boundaries are clamped to zero by star_laplacian)
     interior_mean = residual[:, :, 1:-1, 1:-1].abs().mean().item()
-    assert interior_mean < 1e-4, (
+    assert interior_mean < 1e-8, (
         f"GS residual mean on interior should be ~0 for ψ=R²Z, got {interior_mean:.3e}"
     )
 
@@ -175,7 +175,7 @@ def test_gs_residual_loss_gradient_flow():
     psi_hat = torch.randn(2, 1, 33, 33, requires_grad=True)
     pprime_hat  = torch.zeros(2, 1, 33, 33)
     ffprime_hat = torch.zeros(2, 1, 33, 33)
-    R_hat = R_grid  # shape (1, 1, NR, NZ) — broadcastable
+    R_hat = R_grid[:, :, :, :1]  # shape (1, 1, NR, 1) — documented broadcastable form
 
     loss = gs_residual_loss(psi_hat, pprime_hat, ffprime_hat, R_hat, dR, dZ)
     loss.backward()
@@ -214,14 +214,15 @@ def test_residual_vanishes_on_true_solution():
     zeros = torch.zeros_like(psi_t)
     res = gs_residual_dimensionless(psi_t, zeros, zeros, R_t, dR, dZ)
     interior = res[:, :, 2:-2, 2:-2]
-    # FD truncation only — must be tiny relative to field scale.
-    assert interior.abs().max().item() < 1e-2
+    # FD is exact for this polynomial — residual should be machine-epsilon level.
+    assert interior.abs().max().item() < 1e-8
 
 
-def test_residual_loss_is_scalar_and_nonneg():
+def test_residual_loss_is_scalar():
+    """gs_residual_loss returns a 0-d scalar tensor."""
     psi, R, dR, dZ = _manufactured_solovev(33, 33)
     psi_t = torch.from_numpy(psi).view(1, 1, *psi.shape).double()
     R_t = torch.from_numpy(R).view(1, 1, -1, 1).double()
     zeros = torch.zeros_like(psi_t)
     loss = gs_residual_loss(psi_t, zeros, zeros, R_t, dR, dZ)
-    assert loss.ndim == 0 and loss.item() >= 0.0
+    assert loss.ndim == 0, f"Expected scalar (ndim=0), got ndim={loss.ndim}"

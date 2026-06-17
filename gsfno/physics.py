@@ -12,8 +12,6 @@ where the star-Laplacian is:
 import torch
 from torch import Tensor
 
-_MU0 = 1.2566370614e-6  # vacuum permeability [H/m]
-
 
 def star_laplacian(psi: Tensor, R: Tensor, dR: float, dZ: float) -> Tensor:
     """Compute the GS star-Laplacian Δ*ψ on interior grid points.
@@ -79,50 +77,14 @@ def gs_residual_dimensionless(psi_hat, pprime_hat, ffprime_hat, R_hat, dR_hat, d
 
     Shapes:
         psi_hat, pprime_hat, ffprime_hat: (B, 1, NR, NZ)
-        R_hat: (1, 1, NR, 1) broadcastable
+        R_hat:   (1, 1, NR, 1) broadcastable
+        dR_hat:  float — dimensionless grid spacing in R
+        dZ_hat:  float — dimensionless grid spacing in Z
     """
     R_1d = R_hat.reshape(-1, R_hat.shape[-2], R_hat.shape[-1])[0, :, 0]
     lap = star_laplacian(psi_hat, R_1d, dR_hat, dZ_hat)
     return lap + R_hat * pprime_hat + ffprime_hat
 
-
-def gs_residual(
-    psi: Tensor,
-    p_prime: Tensor,
-    ff_prime: Tensor,
-    R_grid: Tensor,
-    dR: float,
-    dZ: float,
-    mu0: float = _MU0,
-) -> Tensor:
-    """Compute the Grad-Shafranov equation residual.
-
-    residual = Δ*ψ + μ₀ R p'(ψ) + ff'(ψ)
-
-    In equilibrium this is zero everywhere inside the plasma.
-
-    Args:
-        psi:      (B, 1, NR, NZ) predicted flux field.
-        p_prime:  (B, 1, NR, NZ) pressure profile channel (grid-evaluated).
-        ff_prime: (B, 1, NR, NZ) current profile channel (grid-evaluated).
-        R_grid:   (B, 1, NR, NZ) or broadcastable — R coordinate on the grid.
-                  Must be uniform across batch and Z (axisymmetric: R depends
-                  only on the R axis). Typically shape (1, 1, NR, 1).
-        dR:       Grid spacing in R.
-        dZ:       Grid spacing in Z.
-        mu0:      Vacuum permeability (default 4π×10⁻⁷ H/m).
-
-    Returns:
-        (B, 1, NR, NZ) residual tensor.
-    """
-    # Extract 1-D R vector for star_laplacian from whatever shape R_grid has
-    # R_grid is (B, 1, NR, NZ) or (1, 1, NR, 1) — grab the NR axis
-    # R is axisymmetric: same for every batch element and every Z position.
-    # Take a 1-D slice from batch 0, Z column 0.
-    R_1d = R_grid.reshape(-1, R_grid.shape[-2], R_grid.shape[-1])[0, :, 0]  # (NR,)
-
-    lap = star_laplacian(psi, R_1d, dR, dZ)
-    return lap + mu0 * R_grid * p_prime + ff_prime
 
 
 def gs_residual_loss(psi_hat, pprime_hat, ffprime_hat, R_hat, dR_hat, dZ_hat):
