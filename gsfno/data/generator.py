@@ -1,16 +1,21 @@
 """FreeGS free-boundary FORWARD solver wrapper for GS training data.
 
 Each sample varies profile parameters (paxis, Ip, fvac, alpha_m, alpha_n),
-runs a free-boundary Picard solve with fixed x-point constraints, and records:
+runs a free-boundary Picard solve with x-point constraints sampled per call,
+and records:
 
   psi_total      : total poloidal flux on the grid (Wb) = plasma + coil flux
   psi_vac        : coil-only (vacuum) flux on the grid (Wb) -- computed from
                    the Green's-function field without the plasma, so it leaks
                    no answer to the network
+  jtor           : toroidal current density on the grid (A/m^2), evaluated
+                   once after the solve from the FreeGS profiles object and
+                   stored as a plain array for serialisable validation
   pprime_curve   : p'(psi_N) sampled at n_psi points in [0, 1]
   ffprime_curve  : ff'(psi_N) sampled at n_psi points in [0, 1]
-  params         : dict with paxis, Ip, fvac, alpha_m, alpha_n and the
-                   resulting coil currents (recorded after the constrained solve)
+  params         : dict with paxis, Ip, fvac, alpha_m, alpha_n, xpt_r, xpt_z
+                   and the resulting coil currents (recorded after the
+                   constrained solve)
 
 Validation gate
 ---------------
@@ -21,9 +26,10 @@ Grad-Shafranov equation by computing the physical residual:
         ----------------------------------------
              || Delta*(plasma_psi) ||
 
-where plasma_psi = psi_total - psi_vac.  For a converged FreeGS solve this
-is typically 3-5 %; the gate rejects samples with r > tol (default 0.10).
-A deliberately corrupted psi_total yields r close to 1.0.
+where plasma_psi = psi_total - psi_vac and Jtor is the stored array.
+For a converged FreeGS solve this is typically 3-5 %; the gate rejects
+samples with r > tol (default 0.10).  A deliberately corrupted psi_total
+yields r close to 1.0 because the stored jtor no longer matches the field.
 """
 
 from __future__ import annotations
@@ -46,12 +52,6 @@ except ImportError:
 
 _MU0 = 1.2566370614e-6  # vacuum permeability [H/m]
 _EPS = 1e-12
-
-# Fixed x-point and isoflux constraints for TestTokamak.
-# These match the FreeGS test suite and allow the free-boundary Picard
-# iteration to converge reliably across a wide range of profile parameters.
-_XPOINTS = [(1.1, -0.6), (1.1, 0.8)]
-_ISOFLUX = [(1.1, -0.6, 1.1, 0.6)]
 
 
 class PlasmaConfigGenerator:
@@ -133,6 +133,29 @@ class PlasmaConfigGenerator:
             "alpha_n": float(rng.uniform(1.0, 2.5)),
         }
 
+    def _sample_xpoints(self) -> tuple[list, list, float, float]:
+        """Sample x-point geometry per call for shape diversity.
+
+        Lower x-point R in U(1.0, 1.2), |Z| in U(0.5, 0.7).
+        Upper x-point is approximately up-down symmetric (Z negated).
+        Isoflux constraint ties lower and upper x-points together.
+
+        Returns
+        -------
+        xpoints : list of (R, Z) tuples
+        isoflux : list of (R1, Z1, R2, Z2) tuples
+        xpt_r   : sampled R for lower x-point (recorded in params)
+        xpt_z   : |Z| for lower x-point (recorded in params)
+        """
+        rng = self.rng
+        xpt_r = float(rng.uniform(1.0, 1.2))
+        xpt_z = float(rng.uniform(0.5, 0.7))
+
+        xpoints = [(xpt_r, -xpt_z), (xpt_r, xpt_z)]
+        isoflux = [(xpt_r, -xpt_z, xpt_r, xpt_z)]
+
+        return xpoints, isoflux, xpt_r, xpt_z
+
     # ------------------------------------------------------------------
     # Single-sample generation
     # ------------------------------------------------------------------
@@ -154,6 +177,7 @@ class PlasmaConfigGenerator:
             )
 
         params = self._sample_params()
+        xpoints, isoflux, xpt_r, xpt_z = self._sample_xpoints()
 
         try:
             tok = getattr(freegs.machine, self.machine_name)()
@@ -176,8 +200,8 @@ class PlasmaConfigGenerator:
             )
 
             constrain = freegs.control.constrain(
-                xpoints=_XPOINTS,
-                isoflux=_ISOFLUX,
+                xpoints=xpoints,
+                isoflux=isoflux,
             )
 
             freegs.solve(
@@ -199,6 +223,12 @@ class PlasmaConfigGenerator:
             if psi_vac.shape != (self.NR, self.NZ):
                 psi_vac = psi_vac.T
 
+            # Evaluate toroidal current density ONCE right after the solve
+            jtor = profiles.Jtor(RR, ZZ, psi_total, eq.psi_bndry)
+            jtor = np.asarray(jtor, dtype=np.float64)
+            if jtor.shape != (self.NR, self.NZ):
+                jtor = jtor.T
+
             # Record coil currents resulting from the constrained solve
             coil_currents = {
                 f"coil_{name}": float(tok[name].current)
@@ -215,24 +245,27 @@ class PlasmaConfigGenerator:
                 return None
             if not (np.all(np.isfinite(pprime_curve)) and np.all(np.isfinite(ffprime_curve))):
                 return None
+            if not np.all(np.isfinite(jtor)):
+                return None
 
             R0 = float(0.5 * (self.Rmin + self.Rmax))
 
-            full_params = {**params, **coil_currents}
+            full_params = {
+                **params,
+                **coil_currents,
+                "xpt_r": xpt_r,
+                "xpt_z": xpt_z,
+            }
 
             sample = {
                 "psi_total": psi_total.astype(np.float32),
                 "psi_vac": psi_vac.astype(np.float32),
+                "jtor": jtor.astype(np.float32),
                 "pprime_curve": pprime_curve.astype(np.float32),
                 "ffprime_curve": ffprime_curve.astype(np.float32),
                 "params": full_params,
                 "R0": R0,
                 "Ip": float(params["Ip"]),
-                # Stash solve artefacts needed by validate()
-                "_eq": eq,
-                "_profiles": profiles,
-                "_RR": RR,
-                "_ZZ": ZZ,
             }
             return sample
 
@@ -252,8 +285,10 @@ class PlasmaConfigGenerator:
 
             Delta*(plasma_psi) + mu0 * R * Jtor  ~=  0
 
-        where plasma_psi = psi_total - psi_vac and Jtor is evaluated from
-        the FreeGS profiles object stored in the sample at generation time.
+        where plasma_psi = psi_total - psi_vac and Jtor is the stored
+        array evaluated once at generation time.  Because jtor is tied
+        to the original converged psi_total, a corrupted psi_total causes
+        the residual to blow up even though jtor stays fixed.
 
         For a converged FreeGS solve the relative residual is typically 3-5 %.
         The default tolerance is 10 %, giving comfortable headroom.
@@ -270,32 +305,18 @@ class PlasmaConfigGenerator:
         -------
         bool: True if sample passes, False if it should be rejected.
         """
-        eq = sample.get("_eq")
-        profiles = sample.get("_profiles")
-        RR = sample.get("_RR")
-
         psi_total = sample["psi_total"].astype(np.float64)
         psi_vac = sample["psi_vac"].astype(np.float64)
+        jtor = sample["jtor"].astype(np.float64)
+
         plasma_psi = psi_total - psi_vac
 
         R, Z = self.grid()
         dR = float(R[1] - R[0])
         dZ = float(Z[1] - Z[0])
+        RR, _ = np.meshgrid(R, Z, indexing="ij")
 
-        # Compute Jtor using the actual FreeGS profiles
-        if eq is not None and profiles is not None and RR is not None:
-            try:
-                ZZ = sample.get("_ZZ")
-                psi_bndry = eq.psi_bndry
-                Jtor = profiles.Jtor(RR, ZZ, psi_total, psi_bndry)
-                mu0_R_Jtor = _MU0 * RR * Jtor
-            except Exception:
-                # If Jtor can't be evaluated (e.g. corrupted psi lost O-point),
-                # fall back to zero and let the Laplacian check handle it
-                mu0_R_Jtor = np.zeros_like(plasma_psi)
-        else:
-            # No FreeGS objects: fall back to Laplacian-only finiteness check
-            mu0_R_Jtor = np.zeros_like(plasma_psi)
+        mu0_R_Jtor = _MU0 * RR * jtor
 
         # Compute star-Laplacian of plasma_psi via PyTorch FD stencil
         psi_t = torch.from_numpy(plasma_psi).view(1, 1, self.NR, self.NZ)

@@ -42,10 +42,14 @@ def test_generate_one_structure(gen):
     assert s is not None, "generator failed to converge in 20 tries"
     assert s["psi_total"].shape == (33, 33)
     assert s["psi_vac"].shape == (33, 33)
+    assert s["jtor"].shape == (33, 33)
     assert s["pprime_curve"].shape == (16,)
     assert s["ffprime_curve"].shape == (16,)
     assert "Ip" in s and "R0" in s
     assert set(["paxis", "Ip", "fvac", "alpha_m", "alpha_n"]).issubset(s["params"])
+    assert "xpt_r" in s["params"] and "xpt_z" in s["params"]
+    # No live FreeGS objects should be stashed in the sample
+    assert "_eq" not in s and "_profiles" not in s
 
 
 # ---------------------------------------------------------------------------
