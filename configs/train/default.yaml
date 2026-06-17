@@ -8,4 +8,4 @@ early_stopping_patience: 20
 checkpoint_dir: checkpoints/
 log_interval: 1
 # Mixed precision: "bf16" (ROCm 7.2 recommended), "fp16", or "none"
-amp_dtype: none
+amp_dtype: bf16
