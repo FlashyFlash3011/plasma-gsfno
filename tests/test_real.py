@@ -1,6 +1,12 @@
 """Tests for gsfno.data.real (EFITLoader).
 
 All tests use mocking because OMAS/MDSplus are not installed in CI.
+
+NOTE: EFITLoader.load_shot and _process_time_slice now raise NotImplementedError
+because this loader predates the forward-operator redesign.  Tests that called
+those methods have been updated to assert the error is raised, and the
+_interpolate_to_grid helper (which has no redesign dependency) is still tested
+directly.
 """
 
 from __future__ import annotations
@@ -72,53 +78,32 @@ def test_interpolate_to_grid_shape():
 
 
 # ---------------------------------------------------------------------------
-# test_process_time_slice_structure
+# test_load_shot_raises_not_implemented
 # ---------------------------------------------------------------------------
 
 
-def test_process_time_slice_structure():
-    """_process_time_slice returns a dict with correct keys and array shapes."""
+def test_load_shot_raises_not_implemented():
+    """load_shot raises NotImplementedError: loader predates the redesign."""
     from gsfno.data.real import EFITLoader
 
     with patch("gsfno.data.real.OMAS_AVAILABLE", True):
         loader = EFITLoader("jet")
 
-    rng = np.random.default_rng(42)
-    mock_ods = {
-        "equilibrium.time_slice": {
-            0: {
-                "profiles_2d": {
-                    0: {
-                        "psi": rng.standard_normal((10, 12)),
-                        "grid": {
-                            "dim1": np.linspace(0.5, 2.5, 10),
-                            "dim2": np.linspace(-1.5, 1.5, 12),
-                        },
-                    }
-                },
-                "global_quantities": {"ip": 2e6},
-            }
-        }
-    }
+    with pytest.raises(NotImplementedError, match="redesign"):
+        loader.load_shot(92213)
 
-    result = loader._process_time_slice(mock_ods, 0)
 
-    assert result is not None, "_process_time_slice returned None unexpectedly"
-    assert set(result.keys()) == {"inputs", "psi", "params"}
+# ---------------------------------------------------------------------------
+# test_process_time_slice_raises_not_implemented
+# ---------------------------------------------------------------------------
 
-    assert result["inputs"].shape == (5, 65, 65), (
-        f"inputs shape mismatch: {result['inputs'].shape}"
-    )
-    assert result["psi"].shape == (1, 65, 65), (
-        f"psi shape mismatch: {result['psi'].shape}"
-    )
-    assert result["inputs"].dtype == np.float32
-    assert result["psi"].dtype == np.float32
 
-    params = result["params"]
-    assert "machine" in params
-    assert "Ip" in params
-    assert "source" in params
-    assert params["source"] == "efit"
-    assert params["machine"] == "jet"
-    assert params["Ip"] == pytest.approx(2e6)
+def test_process_time_slice_raises_not_implemented():
+    """_process_time_slice raises NotImplementedError: loader predates the redesign."""
+    from gsfno.data.real import EFITLoader
+
+    with patch("gsfno.data.real.OMAS_AVAILABLE", True):
+        loader = EFITLoader("jet")
+
+    with pytest.raises(NotImplementedError, match="redesign"):
+        loader._process_time_slice({}, 0)

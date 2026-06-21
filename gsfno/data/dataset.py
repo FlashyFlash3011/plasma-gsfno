@@ -28,6 +28,9 @@ from torch.utils.data import Dataset
 
 from gsfno.units import Normalization, reference_psi
 
+# Vacuum permeability [H/m] — used to build the GS non-dimensionalization factors.
+_MU0 = 1.2566370614e-6
+
 
 def _lift_curve(curve_1d: np.ndarray, NR: int, NZ: int) -> np.ndarray:
     """Interpolate a (n_psi,) profile curve to (NR,) and broadcast across Z -> (NR, NZ)."""
@@ -83,6 +86,16 @@ class GradShafranovDataset(Dataset):
         Z_norm = np.linspace(0, 1, NZ, dtype=np.float32)[None, :].repeat(NR, 0)
         p_lift = _lift_curve(pcur, NR, NZ)
         ff_lift = _lift_curve(ffcur, NR, NZ)
+
+        # Scale profiles to dimensionless units consistent with the GS equation:
+        #   Δ*ψ̂ = -(μ₀ R₀³/ψ_ref) R̂ p' - (R₀²/ψ_ref) ff'
+        # These factors make each channel O(1) as FNO inputs and ensure the
+        # profile channels are dimensionally commensurate with the star-Laplacian
+        # of ψ̂.  The scaled channels serve as BOTH the model inputs and the
+        # pprime_hat / ffprime_hat arguments to gs_residual_dimensionless —
+        # that is intentional: the residual function expects the same scaled fields.
+        p_lift  = p_lift  * (_MU0 * n.R0 ** 3 / n.psi_ref)
+        ff_lift = ff_lift * (n.R0 ** 2 / n.psi_ref)
 
         inputs = np.stack([psi_vac, R_norm, Z_norm, p_lift, ff_lift], axis=0).astype(np.float32)
         target = psi_total[None, :, :]

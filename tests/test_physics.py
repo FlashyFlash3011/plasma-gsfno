@@ -226,3 +226,65 @@ def test_residual_loss_is_scalar():
     zeros = torch.zeros_like(psi_t)
     loss = gs_residual_loss(psi_t, zeros, zeros, R_t, dR, dZ)
     assert loss.ndim == 0, f"Expected scalar (ndim=0), got ndim={loss.ndim}"
+
+
+# ---------------------------------------------------------------------------
+# 9. test_residual_vanishes_nonzero_profiles  (manufactured equilibrium)
+# ---------------------------------------------------------------------------
+
+def test_residual_vanishes_nonzero_profiles():
+    """GS residual is zero by construction for a manufactured equilibrium with
+    nonzero profiles (float64).
+
+    Strategy:
+      1. Pick a smooth ψ̂ on the interior grid.
+      2. Compute lap = Δ*ψ̂ (the star-Laplacian, via the same star_laplacian fn).
+      3. Choose an arbitrary nonzero pprime_hat.
+      4. Set ffprime_hat = -lap - R_hat * pprime_hat so the residual is
+         identically zero by construction:
+             Δ*ψ̂ + R̂ pprime_hat + ffprime_hat
+             = lap + R̂ pprime_hat + (-lap - R̂ pprime_hat) = 0.
+      5. Assert max |residual| < 1e-8 on the interior (skip 2-cell border where
+         star_laplacian zeroes the boundary stencil).
+
+    This proves gs_residual_dimensionless is correct with nonzero profiles.
+    The existing tests use zero profiles and only verify the Δ*ψ̂ = 0 branch.
+    """
+    NR, NZ = 65, 65
+    R0_val, R1_val = 0.6, 1.4
+    Z0_val, Z1_val = -0.4, 0.4
+
+    R = torch.linspace(R0_val, R1_val, NR, dtype=torch.float64)
+    Z = torch.linspace(Z0_val, Z1_val, NZ, dtype=torch.float64)
+    dR = float((R1_val - R0_val) / (NR - 1))
+    dZ = float((Z1_val - Z0_val) / (NZ - 1))
+
+    RR, ZZ = torch.meshgrid(R, Z, indexing="ij")           # (NR, NZ)
+    R_hat = R.view(1, 1, -1, 1)                            # broadcastable (1,1,NR,1)
+
+    # Smooth test field: ψ̂ = sin(π R̂) * cos(π Ẑ) (just needs to be smooth)
+    pi = torch.pi
+    psi_hat = (torch.sin(pi * RR) * torch.cos(pi * ZZ)).unsqueeze(0).unsqueeze(0)  # (1,1,NR,NZ)
+
+    # Compute the star-Laplacian of ψ̂ using the same function the residual uses
+    lap = star_laplacian(psi_hat, R, dR, dZ)               # (1, 1, NR, NZ)
+
+    # Nonzero pprime_hat: a smoothly varying field
+    pprime_hat = (0.5 * torch.sin(2 * pi * RR) * torch.sin(pi * ZZ)
+                  ).unsqueeze(0).unsqueeze(0).double()     # (1, 1, NR, NZ)
+
+    # Manufacture ffprime_hat so residual is exactly zero:
+    #   Δ*ψ̂ + R̂ pprime_hat + ffprime_hat = 0
+    #   =>  ffprime_hat = -lap - R̂ pprime_hat
+    R_hat_full = RR.unsqueeze(0).unsqueeze(0)              # (1, 1, NR, NZ)
+    ffprime_hat = -lap - R_hat_full * pprime_hat           # (1, 1, NR, NZ)
+
+    residual = gs_residual_dimensionless(psi_hat, pprime_hat, ffprime_hat, R_hat, dR, dZ)
+
+    # Skip 2-cell border where star_laplacian zeroes the boundary stencil
+    interior = residual[:, :, 2:-2, 2:-2]
+    max_err = interior.abs().max().item()
+    assert max_err < 1e-8, (
+        f"GS residual should be ~0 on interior with manufactured nonzero profiles, "
+        f"got max |residual| = {max_err:.3e}"
+    )

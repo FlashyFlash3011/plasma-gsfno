@@ -3,6 +3,15 @@
 OMAS and MDSplus are optional dependencies (``pip install plasma-gsfno[gw]``).
 This module is importable even when OMAS is absent; :class:`EFITLoader` will
 raise ``ImportError`` at instantiation time if OMAS is not installed.
+
+.. warning::
+    This loader predates the forward-operator redesign (branch
+    ``redesign-forward-operator``) and is NOT compatible with the new
+    5-channel contract ``[psi_vac, R_norm, Z_norm, pprime_lift,
+    ffprime_lift]`` with global dimensionless scaling and no mask channel.
+    Calling :meth:`EFITLoader.load_shot` or
+    :meth:`EFITLoader._process_time_slice` will raise
+    ``NotImplementedError`` until this loader is migrated.
 """
 
 from __future__ import annotations
@@ -74,38 +83,21 @@ class EFITLoader:
     # Public API
     # ------------------------------------------------------------------
 
+    _REDESIGN_MSG = (
+        "EFITLoader predates the forward-operator redesign and must be migrated "
+        "to the new 5-channel contract [psi_vac, R_norm, Z_norm, pprime_lift, "
+        "ffprime_lift] with global dimensionless scaling and no boundary_mask "
+        "channel before use.  Real-machine support is out of scope for the "
+        "redesign-forward-operator branch."
+    )
+
     def load_shot(self, shot: int, time_indices: Optional[list[int]] = None) -> list[dict]:
         """Load equilibrium time slices from a single shot.
 
-        Parameters
-        ----------
-        shot:
-            Shot number (e.g. 92213 for JET, 145098 for DIII-D).
-        time_indices:
-            List of time slice indices to load. If *None*, loads all available.
-
-        Returns
-        -------
-        List of sample dicts (same format as ``PlasmaConfigGenerator.generate_one``):
-        ``{'inputs': (5, NR, NZ) float32, 'psi': (1, NR, NZ) float32, 'params': dict}``.
-        Samples that fail to load are skipped with a warning.
+        .. deprecated::
+            Raises ``NotImplementedError`` — see module docstring.
         """
-        ods = self._load_ods(shot)
-
-        all_slices = ods["equilibrium.time_slice"]
-        if time_indices is None:
-            time_indices = list(all_slices.keys())
-
-        samples: list[dict] = []
-        for t_idx in time_indices:
-            result = self._process_time_slice(ods, t_idx)
-            if result is not None:
-                samples.append(result)
-
-        if not samples:
-            logger.warning("No valid time slices loaded for shot %d.", shot)
-
-        return samples
+        raise NotImplementedError(self._REDESIGN_MSG)
 
     # ------------------------------------------------------------------
     # ODS loading
@@ -125,63 +117,10 @@ class EFITLoader:
     def _process_time_slice(self, ods, t_idx: int) -> Optional[dict]:
         """Extract and normalise one time slice from ODS.
 
-        Parameters
-        ----------
-        ods:
-            OMAS ODS (or compatible dict-like) object.
-        t_idx:
-            Time slice index.
-
-        Returns
-        -------
-        Sample dict or *None* on failure.
+        .. deprecated::
+            Raises ``NotImplementedError`` — see module docstring.
         """
-        try:
-            ts = ods["equilibrium.time_slice"][t_idx]
-            psi_2d = np.array(ts["profiles_2d"][0]["psi"])           # (NR_src, NZ_src)
-            R_src = np.array(ts["profiles_2d"][0]["grid"]["dim1"])   # (NR_src,)
-            Z_src = np.array(ts["profiles_2d"][0]["grid"]["dim2"])   # (NZ_src,)
-            Ip = float(ts["global_quantities"]["ip"])
-        except (KeyError, IndexError) as exc:
-            logger.warning("Time slice %d missing data: %s", t_idx, exc)
-            return None
-
-        # Interpolate to standard grid
-        psi_interp = self._interpolate_to_grid(psi_2d, R_src, Z_src)
-
-        # Normalise psi to [0, 1]
-        psi_min, psi_max = psi_interp.min(), psi_interp.max()
-        eps = 1e-10
-        psi_norm = (psi_interp - psi_min) / (psi_max - psi_min + eps)
-
-        # Build normalised coordinate grids
-        R_norm = (self._R_out - self.R_min) / (self.R_max - self.R_min)
-        Z_norm = (self._Z_out - self.Z_min) / (self.Z_max - self.Z_min)
-        R_grid_2d, Z_grid_2d = np.meshgrid(R_norm, Z_norm, indexing="ij")
-
-        # Boundary mask: approximate as psi < 0.99 (LCFS at normalised psi = 1)
-        boundary_mask = (psi_norm < 0.99).astype(np.float32)
-
-        inputs = np.stack(
-            [
-                boundary_mask,
-                R_grid_2d.astype(np.float32),
-                Z_grid_2d.astype(np.float32),
-                np.zeros((self.NR, self.NZ), dtype=np.float32),  # p'  unknown for EFIT
-                np.zeros((self.NR, self.NZ), dtype=np.float32),  # ff' unknown for EFIT
-            ]
-        ).astype(np.float32)  # (5, NR, NZ)
-
-        return {
-            "inputs": inputs,
-            "psi": psi_norm[np.newaxis].astype(np.float32),  # (1, NR, NZ)
-            "params": {
-                "machine": self.machine,
-                "shot": float(t_idx),
-                "Ip": float(Ip),
-                "source": "efit",
-            },
-        }
+        raise NotImplementedError(self._REDESIGN_MSG)
 
     # ------------------------------------------------------------------
     # Interpolation helper

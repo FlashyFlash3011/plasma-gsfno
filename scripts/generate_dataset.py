@@ -147,7 +147,7 @@ def main() -> None:
         pbar.close()
 
     logger.info(
-        "Yield: %d/%d converged (%.1f%%)",
+        "%d kept / %d attempts (%.1f%% pass rate)",
         len(samples), attempts,
         100.0 * len(samples) / max(attempts, 1),
     )
