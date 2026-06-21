@@ -21,8 +21,13 @@ from gsfno.physics import gs_residual_loss  # noqa: E402
 class GradShafranovFNO(nn.Module):
     """FNO surrogate for the Grad-Shafranov equilibrium equation.
 
-    Predicts ψ(R,Z) given 5-channel input fields. The physics-informed loss
-    includes a GS equation residual term that ramps in after `phys_warmup_epochs`.
+    Predicts ψ(R,Z) given 5-channel input fields. Trained as a supervised
+    neural operator on a physics-validated dataset (the GS-residual gate runs
+    at data-generation time). An optional GS-residual loss term can ramp in
+    after `phys_warmup_epochs`, but it is OFF by default (lambda_phys=0): it
+    uses R-indexed lifted profiles, which approximate rather than equal the
+    exact flux-evaluated GS source terms. A correct flux-evaluated physics loss
+    (evaluating p'/ff' at the predicted normalized flux) is future work.
 
     Architecture:
         Input:  (B, 5, NR, NZ)
@@ -37,7 +42,7 @@ class GradShafranovFNO(nn.Module):
         hidden_channels: int = 64,
         n_layers: int = 4,
         modes: int = 16,
-        lambda_phys: float = 0.1,
+        lambda_phys: float = 0.0,
         phys_warmup_epochs: int = 10,
     ):
         super().__init__()

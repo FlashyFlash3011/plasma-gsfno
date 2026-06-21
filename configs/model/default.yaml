@@ -3,5 +3,10 @@ out_channels: 1
 hidden_channels: 64
 n_layers: 4
 modes: 16
-lambda_phys: 0.1
+# Physics-residual loss is OFF by default (lambda_phys: 0). The dataset is
+# already physics-validated at generation time (GS-residual gate). The training
+# residual term uses R-indexed lifted profiles (an approximation, not the exact
+# flux-evaluated GS residual), so it is disabled pending a correct flux-evaluated
+# implementation. Set lambda_phys > 0 only as an experimental soft regularizer.
+lambda_phys: 0
 phys_warmup_epochs: 10
