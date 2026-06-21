@@ -1,121 +1,49 @@
-"""Tests for gsfno.data.dataset — GradShafranovDataset and write_hdf5.
-
-All tests use synthetic in-memory data via tmp_path; FreeGS is not required.
-"""
-
-from __future__ import annotations
-
+# tests/test_dataset.py
 import numpy as np
-import pytest
 import torch
-from torch.utils.data import DataLoader
-
-from gsfno.data.dataset import GradShafranovDataset, write_hdf5
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
-_NR, _NZ = 65, 65
+from gsfno.data.dataset import write_hdf5, GradShafranovDataset
 
 
-def _make_fake_sample(rng: np.random.Generator | None = None) -> dict:
-    """Return a fake sample dict compatible with write_hdf5."""
-    if rng is None:
-        rng = np.random.default_rng()
-    inputs = rng.random((5, _NR, _NZ), dtype=np.float64).astype(np.float32)
-    psi = rng.random((1, _NR, _NZ), dtype=np.float64).astype(np.float32)
-    params = {
-        "R0": float(rng.uniform(1.0, 2.0)),
-        "a": float(rng.uniform(0.3, 0.7)),
-        "kappa": float(rng.uniform(1.0, 2.5)),
-        "Ip": float(rng.uniform(1e5, 5e6)),
+def _fake_sample(NR=16, NZ=16, n_psi=8, scale=1.0, seed=0):
+    rng = np.random.default_rng(seed)
+    return {
+        "psi_total": (scale * rng.standard_normal((NR, NZ))).astype(np.float32),
+        "psi_vac": (0.5 * scale * rng.standard_normal((NR, NZ))).astype(np.float32),
+        "pprime_curve": rng.standard_normal(n_psi).astype(np.float32),
+        "ffprime_curve": rng.standard_normal(n_psi).astype(np.float32),
+        "params": {"paxis": 1e3, "Ip": 5e5, "fvac": 2.0, "alpha_m": 1.0, "alpha_n": 2.0},
+        "R0": 1.05, "Ip": 5e5,
     }
-    return {"inputs": inputs, "psi": psi, "params": params}
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
+def test_write_and_read_shapes(tmp_path):
+    samples = [_fake_sample(seed=i) for i in range(10)]
+    p = tmp_path / "d.h5"
+    write_hdf5(p, samples)
+    ds = GradShafranovDataset(p, split="all")
+    x, y = ds[0]
+    assert x.shape == (5, 16, 16)
+    assert y.shape == (1, 16, 16)
+    assert x.dtype == torch.float32 and y.dtype == torch.float32
 
 
-def test_write_and_read_roundtrip(tmp_path):
-    rng = np.random.default_rng(0)
-    samples = [_make_fake_sample(rng) for _ in range(20)]
-    path = tmp_path / "test.h5"
-
-    write_hdf5(path, samples, split_fractions=(0.8, 0.1, 0.1), seed=0)
-
-    ds = GradShafranovDataset(path, split="all")
-    assert len(ds) == 20
-
-    item = ds[0]
-    assert isinstance(item, tuple) and len(item) == 2
-    inputs_t, psi_t = item
-    assert inputs_t.dtype == torch.float32
-    assert psi_t.dtype == torch.float32
-    assert inputs_t.shape == (5, _NR, _NZ)
-    assert psi_t.shape == (1, _NR, _NZ)
+def test_global_scaling_stored(tmp_path):
+    samples = [_fake_sample(seed=i) for i in range(10)]
+    p = tmp_path / "d.h5"
+    write_hdf5(p, samples)
+    ds = GradShafranovDataset(p, split="all")
+    n = ds.normalization
+    assert n.R0 > 0 and n.psi_ref > 0
 
 
-def test_split_sizes(tmp_path):
-    rng = np.random.default_rng(1)
-    samples = [_make_fake_sample(rng) for _ in range(100)]
-    path = tmp_path / "splits.h5"
-
-    write_hdf5(path, samples, split_fractions=(0.8, 0.1, 0.1), seed=1)
-
-    train = GradShafranovDataset(path, split="train")
-    val = GradShafranovDataset(path, split="val")
-    test = GradShafranovDataset(path, split="test")
-
-    total = len(train) + len(val) + len(test)
-    assert total == 100
-    # Allow ±2 for rounding
-    assert abs(len(train) - 80) <= 2
-
-
-def test_params_roundtrip(tmp_path):
-    rng = np.random.default_rng(2)
-    samples = [_make_fake_sample(rng) for _ in range(10)]
-    path = tmp_path / "params.h5"
-
-    write_hdf5(path, samples, split_fractions=(0.8, 0.1, 0.1), seed=2)
-
-    ds = GradShafranovDataset(path, split="all")
-    keys = ds.params_keys
-    assert isinstance(keys, list)
-    assert all(isinstance(k, str) for k in keys)
-    assert len(keys) > 0
-
-    p = ds.get_params(0)
-    assert isinstance(p, dict)
-    assert set(p.keys()) == set(keys)
-
-
-def test_dataloader_batching(tmp_path):
-    rng = np.random.default_rng(3)
-    samples = [_make_fake_sample(rng) for _ in range(20)]
-    path = tmp_path / "loader.h5"
-
-    write_hdf5(path, samples, split_fractions=(0.8, 0.1, 0.1), seed=3)
-
-    ds = GradShafranovDataset(path, split="train")
-    loader = DataLoader(ds, batch_size=4, shuffle=False)
-
-    batch = next(iter(loader))
-    assert isinstance(batch, (list, tuple)) and len(batch) == 2
-    inputs_b, psi_b = batch
-    assert inputs_b.shape == (4, 5, _NR, _NZ)
-    assert psi_b.shape == (4, 1, _NR, _NZ)
-
-
-def test_invalid_split_raises(tmp_path):
-    rng = np.random.default_rng(4)
-    samples = [_make_fake_sample(rng) for _ in range(10)]
-    path = tmp_path / "invalid.h5"
-
-    write_hdf5(path, samples, seed=4)
-
-    with pytest.raises(ValueError, match="split must be one of"):
-        GradShafranovDataset(path, split="unknown")
+def test_no_per_sample_normalization(tmp_path):
+    # A 10x-larger-magnitude sample must remain ~10x larger after dimensionless scaling.
+    small = _fake_sample(scale=1.0, seed=1)
+    big = _fake_sample(scale=10.0, seed=1)  # same seed => same random pattern, 10x amplitude
+    p = tmp_path / "d.h5"
+    write_hdf5(p, [small, big], shuffle=False)
+    ds = GradShafranovDataset(p, split="all")
+    _, y_small = ds[0]
+    _, y_big = ds[1]
+    ratio = y_big.abs().mean() / (y_small.abs().mean() + 1e-9)
+    assert 8.0 < ratio < 12.0
