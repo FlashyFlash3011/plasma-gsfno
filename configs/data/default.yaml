@@ -1,11 +1,9 @@
 hdf5_path: data/equilibria.h5
-n_samples: 50000
+machine: TestTokamak
+n_samples: 20000
 NR: 65
 NZ: 65
-R_min: 0.5
-R_max: 2.5
-Z_min: -1.5
-Z_max: 1.5
+n_psi: 64
 split_fractions: [0.8, 0.1, 0.1]
 batch_size: 32
 num_workers: 4

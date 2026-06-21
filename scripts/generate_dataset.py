@@ -4,13 +4,16 @@
 Usage:
     python scripts/generate_dataset.py --n-samples 50000 --output data/equilibria.h5
     python scripts/generate_dataset.py --n-samples 100 --output /tmp/test.h5 --seed 0
+
+Multi-process generation is future work: FreeGS is not thread-safe and
+spawning per-worker machines significantly complicates reproducibility.
+The single-process loop below is the current supported path.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import multiprocessing as mp
 import sys
 from pathlib import Path
 
@@ -30,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-samples",
         type=int,
-        default=50000,
+        default=20000,
         help="Number of equilibrium samples to generate.",
     )
     parser.add_argument(
@@ -46,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         help="RNG seed for reproducibility.",
     )
     parser.add_argument(
+        "--machine",
+        type=str,
+        default="TestTokamak",
+        help="FreeGS machine name (freegs.machine.<name>()).",
+    )
+    parser.add_argument(
         "--nr",
         type=int,
         default=65,
@@ -58,10 +67,10 @@ def parse_args() -> argparse.Namespace:
         help="Grid resolution in Z direction.",
     )
     parser.add_argument(
-        "--workers",
+        "--n-psi",
         type=int,
-        default=1,
-        help="Number of worker processes (FreeGS is not thread-safe; keep at 1).",
+        default=64,
+        help="Number of normalised-psi sample points for profile curves.",
     )
     parser.add_argument(
         "--log-level",
@@ -71,26 +80,6 @@ def parse_args() -> argparse.Namespace:
         help="Logging verbosity level.",
     )
     return parser.parse_args()
-
-
-def _worker(args_tuple: tuple) -> list[dict]:
-    """Generate a chunk of samples in a subprocess."""
-    import logging as _logging
-    import warnings as _warnings
-    _logging.disable(_logging.WARNING)
-    _warnings.filterwarnings("ignore")  # suppress FreeGS/numpy RuntimeWarnings
-
-    nr, nz, seed, n_chunk = args_tuple
-    gen = PlasmaConfigGenerator(NR=nr, NZ=nz, seed=seed)
-    results = []
-    attempts = 0
-    max_attempts = 3 * n_chunk
-    while len(results) < n_chunk and attempts < max_attempts:
-        r = gen.generate_one()
-        attempts += 1
-        if r is not None:
-            results.append(r)
-    return results
 
 
 def main() -> None:
@@ -115,14 +104,15 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    n_workers = max(1, args.workers)
+    n = args.n_samples
     logger.info(
-        "Generating %d samples on a %d×%d grid -> %s  (workers=%d)",
-        args.n_samples,
+        "Generating %d samples on a %d×%d grid, n_psi=%d, machine=%s -> %s",
+        n,
         args.nr,
         args.nz,
+        args.n_psi,
+        args.machine,
         output_path,
-        n_workers,
     )
 
     try:
@@ -130,52 +120,37 @@ def main() -> None:
     except ImportError:
         tqdm = None
 
-    n = args.n_samples
+    gen = PlasmaConfigGenerator(
+        machine_name=args.machine,
+        NR=args.nr,
+        NZ=args.nz,
+        n_psi=args.n_psi,
+        seed=args.seed,
+    )
     samples: list[dict] = []
+    attempts = 0
+    max_attempts = 5 * n
+    pbar = tqdm(total=n, desc="Generating", unit="sample") if tqdm else None
+    while len(samples) < n and attempts < max_attempts:
+        s = gen.generate_one()
+        attempts += 1
+        if s is not None and gen.validate(s):
+            samples.append(s)
+            if pbar:
+                pbar.update(1)
+        else:
+            logger.debug(
+                "Attempt %d/%d failed or rejected, have %d/%d samples.",
+                attempts, max_attempts, len(samples), n,
+            )
+    if pbar:
+        pbar.close()
 
-    if n_workers == 1:
-        # Single-process path (original behaviour)
-        generator = PlasmaConfigGenerator(NR=args.nr, NZ=args.nz, seed=args.seed)
-        max_attempts = 3 * n
-        pbar = tqdm(total=n, desc="Generating equilibria", unit="sample") if tqdm else None
-        attempts = 0
-        while len(samples) < n and attempts < max_attempts:
-            result = generator.generate_one()
-            attempts += 1
-            if result is not None:
-                samples.append(result)
-                if pbar is not None:
-                    pbar.update(1)
-            else:
-                logger.debug(
-                    "Attempt %d/%d failed, have %d/%d samples.",
-                    attempts, max_attempts, len(samples), n,
-                )
-        if pbar is not None:
-            pbar.close()
-    else:
-        # Multi-process path: submit many small tasks so the progress bar updates
-        # continuously rather than waiting for one giant chunk per worker.
-        task_size = 100  # samples per task
-        n_tasks = (n + task_size - 1) // task_size
-        # Give each task a unique seed so workers produce non-overlapping sequences
-        worker_args = [
-            (args.nr, args.nz, args.seed + i * task_size, task_size)
-            for i in range(n_tasks)
-        ]
-        pbar = tqdm(total=n, desc="Generating equilibria", unit="sample") if tqdm else None
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=n_workers) as pool:
-            for chunk in pool.imap_unordered(_worker, worker_args):
-                needed = n - len(samples)
-                samples.extend(chunk[:needed])
-                if pbar is not None:
-                    pbar.update(min(len(chunk), needed))
-                if len(samples) >= n:
-                    pool.terminate()
-                    break
-        if pbar is not None:
-            pbar.close()
+    logger.info(
+        "Yield: %d/%d converged (%.1f%%)",
+        len(samples), attempts,
+        100.0 * len(samples) / max(attempts, 1),
+    )
 
     if len(samples) < n:
         logger.warning("Only collected %d/%d samples.", len(samples), n)
