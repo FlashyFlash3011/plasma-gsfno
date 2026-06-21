@@ -73,39 +73,44 @@ class GradShafranovFNO(nn.Module):
         psi_pred: Tensor,
         psi_true: Tensor,
         inputs: Tensor,
-        R_grid: Tensor,
-        dR: float,
-        dZ: float,
+        R_hat: Tensor,
+        dR_hat: float,
+        dZ_hat: float,
     ) -> tuple[Tensor, dict]:
         """Compute total training loss.
 
         Loss = MSE(ψ_pred, ψ_true)
              + 0.01 * relative_l2_error(ψ_pred, ψ_true)
-             + λ_eff * GS_residual_loss(ψ_pred, p_prime, ff_prime, R_grid, dR, dZ)
+             + λ_eff * gs_residual_loss(ψ_pred, pprime_lift, ffprime_lift, R_hat, dR_hat, dZ_hat)
 
         where λ_eff = 0 for epoch < phys_warmup_epochs, else lambda_phys.
+        All inputs are dimensionless (hat quantities).
 
         Args:
-            psi_pred: (B, 1, NR, NZ) predicted flux
-            psi_true: (B, 1, NR, NZ) ground truth flux
-            inputs:   (B, 5, NR, NZ) input channels (ch3=p_prime, ch4=ff_prime)
-            R_grid:   (1, 1, NR, 1) or (B, 1, NR, NZ) — R coordinate
-            dR:       grid spacing in R
-            dZ:       grid spacing in Z
+            psi_pred:  (B, 1, NR, NZ) predicted dimensionless flux
+            psi_true:  (B, 1, NR, NZ) ground truth dimensionless flux
+            inputs:    (B, 5, NR, NZ) input channels — fixed order:
+                       [psi_vac, R_norm, Z_norm, pprime_lift, ffprime_lift]
+                       ch3=pprime_lift, ch4=ffprime_lift (no mask channel)
+            R_hat:     (1, 1, NR, 1) dimensionless R coordinate
+            dR_hat:    dimensionless grid spacing in R
+            dZ_hat:    dimensionless grid spacing in Z
 
         Returns:
             (total_loss, metrics_dict) where metrics_dict has keys:
             'mse', 'rel_l2', 'phys_loss', 'lambda_eff', 'total'
         """
-        p_prime = inputs[:, 3:4, :, :]   # channel 3
-        ff_prime = inputs[:, 4:5, :, :]  # channel 4
+        # channel order: [psi_vac, R_norm, Z_norm, pprime_lift, ffprime_lift]
+        # ch3=pprime_lift, ch4=ffprime_lift — matches dataset; no 6th mask channel
+        pprime = inputs[:, 3:4, :, :]
+        ffprime = inputs[:, 4:5, :, :]
 
         mse = F.mse_loss(psi_pred, psi_true)
         rel_l2 = relative_l2_error(psi_pred, psi_true)
 
         lambda_eff = self.lambda_phys if self._current_epoch >= self.phys_warmup_epochs else 0.0
         if lambda_eff > 0:
-            phys_loss = gs_residual_loss(psi_pred, p_prime, ff_prime, R_grid, dR, dZ)
+            phys_loss = gs_residual_loss(psi_pred, pprime, ffprime, R_hat, dR_hat, dZ_hat)
         else:
             phys_loss = torch.zeros(1, device=psi_pred.device)
 
@@ -114,7 +119,7 @@ class GradShafranovFNO(nn.Module):
         metrics = {
             "mse": mse.item(),
             "rel_l2": rel_l2.item(),
-            "phys_loss": phys_loss.item(),
+            "phys_loss": float(phys_loss.item()),
             "lambda_eff": lambda_eff,
             "total": total.item(),
         }
