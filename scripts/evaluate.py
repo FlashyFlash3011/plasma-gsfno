@@ -20,26 +20,33 @@ from torch.utils.data import DataLoader
 
 from gsfno.model import GradShafranovFNO
 from gsfno.data.dataset import GradShafranovDataset
-from gsfno.physics import gs_residual_loss
+from gsfno.physics import gs_residual_dimensionless
 from solaris.metrics import relative_l2_error, rmse, r2_score
 from solaris.utils import load_checkpoint, get_logger
 
 
-def evaluate(model, dataloader, device, cfg_data: dict) -> dict:
-    """Run evaluation loop, return metrics dict."""
+def evaluate(model, dataloader, device, norm) -> dict:
+    """Run evaluation loop, return metrics dict.
+
+    Args:
+        model:      trained GradShafranovFNO.
+        dataloader: yields (inputs (B,5,NR,NZ), psi_true (B,1,NR,NZ)) dimensionless.
+        device:     torch device.
+        norm:       Normalization(R0, psi_ref) from dataset.normalization.
+    """
     model.eval()
 
-    NR = cfg_data.get("NR", 65)
-    NZ = cfg_data.get("NZ", 65)
-    R_min = cfg_data.get("R_min", 0.5)
-    R_max = cfg_data.get("R_max", 2.5)
-    Z_min = cfg_data.get("Z_min", -1.5)
-    Z_max = cfg_data.get("Z_max", 1.5)
+    # Infer NR/NZ from first batch shape via dataloader dataset
+    dataset = dataloader.dataset
+    NR = getattr(dataset, "_NR", 65)
+    NZ = getattr(dataset, "_NZ", 65)
 
-    R_vals = torch.linspace(R_min, R_max, NR, device=device)
-    R_grid = R_vals.view(1, 1, NR, 1)
-    dR = (R_max - R_min) / (NR - 1)
-    dZ = (Z_max - Z_min) / (NZ - 1)
+    # Dimensionless grid — physical domain matches generator defaults
+    R_phys = torch.linspace(0.1, 2.0, NR)
+    R_hat = (R_phys / norm.R0).view(1, 1, NR, 1).to(device)
+    dR_hat = float((R_phys[1] - R_phys[0]) / norm.R0)
+    Z_phys = torch.linspace(-1.0, 1.0, NZ)
+    dZ_hat = float((Z_phys[1] - Z_phys[0]) / norm.R0)
 
     all_rel_l2 = []
     all_rmse = []
@@ -58,8 +65,8 @@ def evaluate(model, dataloader, device, cfg_data: dict) -> dict:
 
             p_prime = inputs[:, 3:4, :, :]
             ff_prime = inputs[:, 4:5, :, :]
-            phys = gs_residual_loss(psi_pred, p_prime, ff_prime, R_grid, dR, dZ)
-            all_phys.append(phys.item())
+            res = gs_residual_dimensionless(psi_pred, p_prime, ff_prime, R_hat, dR_hat, dZ_hat)
+            all_phys.append(res.pow(2).mean().item())
 
     return {
         "rel_l2_mean": float(np.mean(all_rel_l2)),
@@ -122,6 +129,7 @@ def main() -> None:
     # --- Dataset and dataloader ---
     log.info(f"Loading split={args.split!r} from {args.hdf5}")
     dataset = GradShafranovDataset(args.hdf5, split=args.split)
+    norm = dataset.normalization
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -132,8 +140,7 @@ def main() -> None:
     log.info(f"Split size: {len(dataset)} samples, {len(dataloader)} batches")
 
     # --- Evaluate ---
-    cfg_data: dict = {}  # use defaults (65×65 grid, standard domain)
-    metrics = evaluate(model, dataloader, device, cfg_data)
+    metrics = evaluate(model, dataloader, device, norm)
 
     # --- Print results table ---
     print()

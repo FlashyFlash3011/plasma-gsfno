@@ -23,6 +23,8 @@ def benchmark_gsfno(
     n_samples: int,
     batch_size: int,
     device: str,
+    NR: int = 65,
+    NZ: int = 65,
     warmup: int = 10,
 ) -> tuple[float, float]:
     """Time GradShafranovFNO inference.
@@ -31,7 +33,7 @@ def benchmark_gsfno(
         (mean_ms, std_ms) over n_samples timed runs.
     """
     model.eval()
-    x = torch.randn(batch_size, 5, 65, 65, device=device)
+    x = torch.randn(batch_size, 5, NR, NZ, device=device)
 
     # Warmup
     for _ in range(warmup):
@@ -115,6 +117,18 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Number of GPU warmup iterations before timing (default: 10).",
     )
+    parser.add_argument(
+        "--NR",
+        type=int,
+        default=65,
+        help="Grid points in R direction (default: 65).",
+    )
+    parser.add_argument(
+        "--NZ",
+        type=int,
+        default=65,
+        help="Grid points in Z direction (default: 65).",
+    )
     return parser.parse_args()
 
 
@@ -138,11 +152,14 @@ def main() -> None:
 
     # --- Benchmark gsFNO ---
     log.info("Benchmarking GradShafranovFNO inference ...")
+    log.info(f"Grid: NR={args.NR}, NZ={args.NZ}")
     fno_mean, fno_std = benchmark_gsfno(
         model,
         n_samples=args.n_samples,
         batch_size=args.batch_size,
         device=device,
+        NR=args.NR,
+        NZ=args.NZ,
         warmup=args.warmup,
     )
     log.info(f"GradShafranovFNO: {fno_mean:.3f} ± {fno_std:.3f} ms")

@@ -78,13 +78,16 @@ def main(cfg: DictConfig) -> None:
     use_scaler = cfg.train.amp_dtype == "fp16"
     scaler = torch.amp.GradScaler(enabled=use_scaler)
 
-    # --- Grid geometry for physics loss ---
-    # Pre-compute R_grid once (same for all samples since grid is fixed)
+    # --- Dimensionless grid geometry for physics loss ---
+    # Built from dataset normalization (R0) and physical domain matching generator defaults:
+    # Rmin=0.1, Rmax=2.0, Zmin=-1.0, Zmax=1.0
+    norm = train_ds.normalization
     NR, NZ = cfg.data.NR, cfg.data.NZ
-    R_vals = torch.linspace(cfg.data.R_min, cfg.data.R_max, NR, device=device)
-    R_grid = R_vals.view(1, 1, NR, 1)  # broadcast shape: (1, 1, NR, 1)
-    dR = float((cfg.data.R_max - cfg.data.R_min) / (NR - 1))
-    dZ = float((cfg.data.Z_max - cfg.data.Z_min) / (NZ - 1))
+    R_phys = torch.linspace(cfg.data.get("R_min", 0.1), cfg.data.get("R_max", 2.0), NR)
+    R_hat = (R_phys / norm.R0).view(1, 1, NR, 1).to(device)
+    dR_hat = float((R_phys[1] - R_phys[0]) / norm.R0)
+    Z_phys = torch.linspace(cfg.data.get("Z_min", -1.0), cfg.data.get("Z_max", 1.0), NZ)
+    dZ_hat = float((Z_phys[1] - Z_phys[0]) / norm.R0)
 
     # --- Training loop ---
     ckpt_dir = Path(cfg.train.checkpoint_dir)
@@ -105,7 +108,7 @@ def main(cfg: DictConfig) -> None:
             with amp_ctx:
                 psi_pred = model(inputs)
                 loss, metrics = model.compute_loss(
-                    psi_pred, psi_true, inputs, R_grid, dR, dZ
+                    psi_pred, psi_true, inputs, R_hat, dR_hat, dZ_hat
                 )
 
             if use_scaler:
@@ -133,7 +136,7 @@ def main(cfg: DictConfig) -> None:
                 inputs = inputs.to(device, non_blocking=True)
                 psi_true = psi_true.to(device, non_blocking=True)
                 psi_pred = model(inputs)
-                loss, _ = model.compute_loss(psi_pred, psi_true, inputs, R_grid, dR, dZ)
+                loss, _ = model.compute_loss(psi_pred, psi_true, inputs, R_hat, dR_hat, dZ_hat)
                 val_loss += loss.item()
         val_loss /= len(val_loader)
 
