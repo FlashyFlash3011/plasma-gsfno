@@ -25,7 +25,7 @@ from solaris.metrics import relative_l2_error, rmse, r2_score
 from solaris.utils import load_checkpoint, get_logger
 
 
-def evaluate(model, dataloader, device, norm) -> dict:
+def evaluate(model, dataloader, device, norm, r_min=0.1, r_max=2.0, z_min=-1.0, z_max=1.0) -> dict:
     """Run evaluation loop, return metrics dict.
 
     Args:
@@ -33,6 +33,10 @@ def evaluate(model, dataloader, device, norm) -> dict:
         dataloader: yields (inputs (B,5,NR,NZ), psi_true (B,1,NR,NZ)) dimensionless.
         device:     torch device.
         norm:       Normalization(R0, psi_ref) from dataset.normalization.
+        r_min:      Physical R domain minimum (default 0.1, matches FreeGS generator).
+        r_max:      Physical R domain maximum (default 2.0, matches FreeGS generator).
+        z_min:      Physical Z domain minimum (default -1.0, matches FreeGS generator).
+        z_max:      Physical Z domain maximum (default 1.0, matches FreeGS generator).
     """
     model.eval()
 
@@ -41,11 +45,11 @@ def evaluate(model, dataloader, device, norm) -> dict:
     NR = getattr(dataset, "_NR", 65)
     NZ = getattr(dataset, "_NZ", 65)
 
-    # Dimensionless grid — physical domain matches generator defaults
-    R_phys = torch.linspace(0.1, 2.0, NR)
+    # Dimensionless grid — physical domain configurable, defaults match FreeGS generator
+    R_phys = torch.linspace(r_min, r_max, NR)
     R_hat = (R_phys / norm.R0).view(1, 1, NR, 1).to(device)
     dR_hat = float((R_phys[1] - R_phys[0]) / norm.R0)
-    Z_phys = torch.linspace(-1.0, 1.0, NZ)
+    Z_phys = torch.linspace(z_min, z_max, NZ)
     dZ_hat = float((Z_phys[1] - Z_phys[0]) / norm.R0)
 
     all_rel_l2 = []
@@ -107,6 +111,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to save JSON results.",
     )
+    parser.add_argument(
+        "--r-min",
+        type=float,
+        default=0.1,
+        help="Physical R domain minimum (default: 0.1).",
+    )
+    parser.add_argument(
+        "--r-max",
+        type=float,
+        default=2.0,
+        help="Physical R domain maximum (default: 2.0).",
+    )
+    parser.add_argument(
+        "--z-min",
+        type=float,
+        default=-1.0,
+        help="Physical Z domain minimum (default: -1.0).",
+    )
+    parser.add_argument(
+        "--z-max",
+        type=float,
+        default=1.0,
+        help="Physical Z domain maximum (default: 1.0).",
+    )
     return parser.parse_args()
 
 
@@ -140,7 +168,16 @@ def main() -> None:
     log.info(f"Split size: {len(dataset)} samples, {len(dataloader)} batches")
 
     # --- Evaluate ---
-    metrics = evaluate(model, dataloader, device, norm)
+    metrics = evaluate(
+        model,
+        dataloader,
+        device,
+        norm,
+        r_min=args.r_min,
+        r_max=args.r_max,
+        z_min=args.z_min,
+        z_max=args.z_max,
+    )
 
     # --- Print results table ---
     print()
