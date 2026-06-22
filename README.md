@@ -34,6 +34,27 @@ Training data is generated via FreeGS free-boundary forward equilibrium solves w
 
 The model trains as a supervised neural operator on this physics-validated data. An optional GS-residual loss term exists but is **off by default** (`lambda_phys: 0`): it currently uses R-indexed lifted profiles, which approximate rather than equal the exact flux-evaluated GS source terms. A correct flux-evaluated physics-informed loss is future work; physics validity is presently enforced at data-generation time.
 
+## Results
+
+Trained on 20,000 FreeGS free-boundary equilibria (65×65, TestTokamak; 16k/2k/2k train/val/test). Evaluated on the held-out test split:
+
+| Metric | Value |
+|--------|-------|
+| R² | **0.975** |
+| Relative L2 (mean) | **0.120** (12%) |
+| RMSE | 0.019 |
+| Trivial baseline — predict ψ_vac (relative L2) | 1.078 (108%) |
+| Inference latency (FNO, 1×H100) | **1.2 ms** |
+| GS solve time (FreeGS, CPU) | ~0.79 s |
+
+The model is **~9× more accurate than the trivial "copy the vacuum field" baseline**, confirming it genuinely learns the plasma contribution to the flux rather than echoing an input. Inference is ~**650× faster** than the iterative solve (GPU surrogate vs CPU solver).
+
+Reproduce with `bash deploy/runpod/train_and_eval.sh` (see [deploy/runpod](deploy/runpod)).
+
+### What `results/prediction.png` shows
+
+**TL;DR:** each row is one test equilibrium; the three columns are **ground-truth flux ψ | model prediction | absolute error**. The first two columns should look nearly identical, and the error panel should be faint with no strong structure in the plasma core — i.e. the network reproduces the equilibrium it was never trained on.
+
 ## License
 
 Apache 2.0
