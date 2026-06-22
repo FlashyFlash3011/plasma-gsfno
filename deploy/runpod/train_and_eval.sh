@@ -15,10 +15,14 @@ if [ ! -f "$DATA" ]; then
   echo "Dataset not found: $DATA  (generate locally and upload it here)"; exit 1
 fi
 
-echo "==> training on $DATA for up to $EPOCHS epochs (bf16, CUDA)"
+# fp32 (amp_dtype=none): torch.fft.rfft2 does not support bf16/fp16, so the FNO's
+# spectral layers require fp32. On an H100 this 8.4M-param model still trains in
+# minutes. (Mixed precision would need the FFT wrapped in autocast(enabled=False)
+# in Solaris's spectral conv — future optimization, unnecessary here.)
+echo "==> training on $DATA for up to $EPOCHS epochs (fp32, CUDA)"
 python scripts/train.py \
   data.hdf5_path="$DATA" data.NR=65 data.NZ=65 \
-  data.batch_size=64 train.epochs="$EPOCHS" train.amp_dtype=bf16
+  data.batch_size=64 train.epochs="$EPOCHS" train.amp_dtype=none
 
 echo "==> evaluating best checkpoint on the test split"
 python scripts/evaluate.py \
