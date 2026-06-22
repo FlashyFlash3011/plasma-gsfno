@@ -51,9 +51,11 @@ The model is **~9× more accurate than the trivial "copy the vacuum field" basel
 
 Reproduce with `bash deploy/runpod/train_and_eval.sh` (see [deploy/runpod](deploy/runpod)).
 
-### What `results/prediction.png` shows
+### Prediction vs. ground truth
 
-**TL;DR:** each row is one test equilibrium; the three columns are **ground-truth flux ψ | model prediction | absolute error**. The first two columns should look nearly identical, and the error panel should be faint with no strong structure in the plasma core — i.e. the network reproduces the equilibrium it was never trained on.
+![Predicted vs ground-truth poloidal flux](results/prediction.png)
+
+**TL;DR:** each row is one held-out test equilibrium; the three columns are **ground-truth flux ψ | model prediction | absolute error**. The prediction reproduces the global flux structure (bright plasma core, dark coil regions) on equilibria it never saw in training. The residual error is concentrated in the plasma core and small relative to the field; per-sample relative L2 ranges from ~0.03 (easy) to ~0.42 (hard), averaging 0.12 across the test set.
 
 ## License
 
