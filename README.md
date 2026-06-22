@@ -10,7 +10,6 @@ Built on [Solaris](../Solaris) — a physics AI framework for neural operators o
 # Activate the Solaris venv (shared)
 source ~/projects/research/Solaris/.venv/bin/activate
 
-# Install in editable mode
 pip install -e ".[dev]"
 ```
 
