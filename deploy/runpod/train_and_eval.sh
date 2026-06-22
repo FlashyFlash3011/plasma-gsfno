@@ -19,10 +19,14 @@ fi
 # spectral layers require fp32. On an H100 this 8.4M-param model still trains in
 # minutes. (Mixed precision would need the FFT wrapped in autocast(enabled=False)
 # in Solaris's spectral conv — future optimization, unnecessary here.)
-echo "==> training on $DATA for up to $EPOCHS epochs (fp32, CUDA)"
+echo "==> training on $DATA for up to $EPOCHS epochs (fp32, CUDA, in-memory data)"
+# in_memory=true decompresses the dataset into RAM once (no per-epoch gzip
+# re-decompression); num_workers=0 then feeds the (tiny) model fine and avoids
+# DataLoader worker spawn/teardown stalls between epochs.
 python scripts/train.py \
   data.hdf5_path="$DATA" data.NR=65 data.NZ=65 \
-  data.batch_size=64 train.epochs="$EPOCHS" train.amp_dtype=none
+  data.batch_size=256 data.num_workers=0 data.in_memory=true \
+  train.epochs="$EPOCHS" train.amp_dtype=none
 
 echo "==> evaluating best checkpoint on the test split"
 python scripts/evaluate.py \

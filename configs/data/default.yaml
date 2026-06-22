@@ -7,4 +7,7 @@ n_psi: 64
 split_fractions: [0.8, 0.1, 0.1]
 batch_size: 32
 num_workers: 4
+# Decompress the dataset once into RAM (avoids per-access gzip re-decompression
+# that starves the GPU). Recommended on; with it, num_workers can be small/0.
+in_memory: true
 seed: 42

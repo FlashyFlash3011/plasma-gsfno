@@ -42,7 +42,7 @@ def _lift_curve(curve_1d: np.ndarray, NR: int, NZ: int) -> np.ndarray:
 class GradShafranovDataset(Dataset):
     SPLIT_MAP = {"train": 0, "val": 1, "test": 2, "all": None}
 
-    def __init__(self, hdf5_path, split="train"):
+    def __init__(self, hdf5_path, split="train", in_memory=False):
         if split not in self.SPLIT_MAP:
             raise ValueError(
                 f"split must be one of {list(self.SPLIT_MAP.keys())!r}, got {split!r}"
@@ -50,6 +50,7 @@ class GradShafranovDataset(Dataset):
         self._path = Path(hdf5_path)
         self._split = split
         self._handle: Optional[h5py.File] = None
+        self._cache: Optional[dict] = None
         with h5py.File(self._path, "r") as f:
             splits = f["splits"][:]
             self._R0 = float(f.attrs["R0"])
@@ -59,6 +60,19 @@ class GradShafranovDataset(Dataset):
         code = self.SPLIT_MAP[split]
         self._indices = (np.arange(len(splits)) if code is None
                          else np.where(splits == code)[0]).astype(np.intp)
+
+        if in_memory:
+            # Decompress this split ONCE into RAM (sequential read), then serve
+            # from memory. Avoids per-access gzip chunk re-decompression that
+            # otherwise starves the GPU under shuffled access. ~680 MB for 20k.
+            idx = self._indices
+            with h5py.File(self._path, "r") as f:
+                self._cache = {
+                    "psi_total": f["psi_total"][idx].astype(np.float32),
+                    "psi_vac": f["psi_vac"][idx].astype(np.float32),
+                    "pprime_curve": f["pprime_curve"][idx].astype(np.float32),
+                    "ffprime_curve": f["ffprime_curve"][idx].astype(np.float32),
+                }
 
     @property
     def normalization(self) -> Normalization:
@@ -73,13 +87,20 @@ class GradShafranovDataset(Dataset):
         return len(self._indices)
 
     def __getitem__(self, idx):
-        gi = int(self._indices[idx])
-        f = self._file()
         n = self.normalization
-        psi_total = f["psi_total"][gi].astype(np.float32) / n.psi_ref
-        psi_vac = f["psi_vac"][gi].astype(np.float32) / n.psi_ref
-        pcur = f["pprime_curve"][gi]
-        ffcur = f["ffprime_curve"][gi]
+        if self._cache is not None:
+            # Serve from the in-RAM cache (already this split's subset, in order).
+            psi_total = self._cache["psi_total"][idx].astype(np.float32) / n.psi_ref
+            psi_vac = self._cache["psi_vac"][idx].astype(np.float32) / n.psi_ref
+            pcur = self._cache["pprime_curve"][idx]
+            ffcur = self._cache["ffprime_curve"][idx]
+        else:
+            gi = int(self._indices[idx])
+            f = self._file()
+            psi_total = f["psi_total"][gi].astype(np.float32) / n.psi_ref
+            psi_vac = f["psi_vac"][gi].astype(np.float32) / n.psi_ref
+            pcur = f["pprime_curve"][gi]
+            ffcur = f["ffprime_curve"][gi]
 
         NR, NZ = self._NR, self._NZ
         R_norm = np.linspace(0, 1, NR, dtype=np.float32)[:, None].repeat(NZ, 1)

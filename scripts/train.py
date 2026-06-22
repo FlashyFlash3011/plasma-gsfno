@@ -38,8 +38,9 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Device: {device}")
 
     # --- Data ---
-    train_ds = GradShafranovDataset(cfg.data.hdf5_path, split="train")
-    val_ds = GradShafranovDataset(cfg.data.hdf5_path, split="val")
+    _in_mem = cfg.data.get("in_memory", False)
+    train_ds = GradShafranovDataset(cfg.data.hdf5_path, split="train", in_memory=_in_mem)
+    val_ds = GradShafranovDataset(cfg.data.hdf5_path, split="val", in_memory=_in_mem)
     # Keep workers alive across epochs (avoids re-spawning + reopening HDF5 each
     # epoch) and prefetch ahead so the GPU isn't starved on gzip decompression.
     _nw = cfg.data.num_workers
