@@ -45,7 +45,7 @@ def main() -> None:
     model.load_state_dict(state)
     model.eval()
 
-    ds = GradShafranovDataset(args.hdf5, split=args.split)
+    ds = GradShafranovDataset(args.hdf5, split=args.split, in_memory=True)
     n = min(args.n, len(ds))
     idxs = np.linspace(0, len(ds) - 1, n).astype(int)
 

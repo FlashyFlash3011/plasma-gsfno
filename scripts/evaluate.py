@@ -156,7 +156,7 @@ def main() -> None:
 
     # --- Dataset and dataloader ---
     log.info(f"Loading split={args.split!r} from {args.hdf5}")
-    dataset = GradShafranovDataset(args.hdf5, split=args.split)
+    dataset = GradShafranovDataset(args.hdf5, split=args.split, in_memory=True)
     norm = dataset.normalization
     dataloader = DataLoader(
         dataset,
