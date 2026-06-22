@@ -40,20 +40,14 @@ def main(cfg: DictConfig) -> None:
     # --- Data ---
     train_ds = GradShafranovDataset(cfg.data.hdf5_path, split="train")
     val_ds = GradShafranovDataset(cfg.data.hdf5_path, split="val")
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.data.batch_size,
-        shuffle=True,
-        num_workers=cfg.data.num_workers,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.data.batch_size,
-        shuffle=False,
-        num_workers=cfg.data.num_workers,
-        pin_memory=True,
-    )
+    # Keep workers alive across epochs (avoids re-spawning + reopening HDF5 each
+    # epoch) and prefetch ahead so the GPU isn't starved on gzip decompression.
+    _nw = cfg.data.num_workers
+    _loader_kw = dict(num_workers=_nw, pin_memory=True)
+    if _nw > 0:
+        _loader_kw.update(persistent_workers=True, prefetch_factor=4)
+    train_loader = DataLoader(train_ds, batch_size=cfg.data.batch_size, shuffle=True, **_loader_kw)
+    val_loader = DataLoader(val_ds, batch_size=cfg.data.batch_size, shuffle=False, **_loader_kw)
 
     # --- Model ---
     model = GradShafranovFNO(**OmegaConf.to_container(cfg.model)).to(device)
