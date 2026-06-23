@@ -8,7 +8,7 @@ Built on [Solaris](../Solaris) — a physics AI framework for neural operators o
 
 ```bash
 # Activate the Solaris venv (shared)
-source ~/projects/research/Solaris/.venv/bin/activate
+source ~/path-to-your-Solaris-install/.venv/bin/activate
 
 pip install -e ".[dev]"
 ```
